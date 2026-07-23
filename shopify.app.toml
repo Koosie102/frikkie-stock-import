@@ -3,7 +3,7 @@
 client_id = "967712365a20b26ba490d896a343e824"
 name = "frikkies-stock-importer"
 handle = "frikkies-stock-importer"
-application_url = "https://REPLACE_WITH_RAILWAY_DOMAIN.up.railway.app/"
+application_url = "https://frikkie-stock-import-production.up.railway.app/"
 embedded = true
 
 [build]
@@ -16,9 +16,9 @@ scopes = "read_products,write_products,read_inventory,write_inventory,read_onlin
 
 [auth]
 redirect_urls = [
-  "https://REPLACE_WITH_RAILWAY_DOMAIN.up.railway.app/auth/callback",
-  "https://REPLACE_WITH_RAILWAY_DOMAIN.up.railway.app/auth/shopify/callback",
-  "https://REPLACE_WITH_RAILWAY_DOMAIN.up.railway.app/api/auth/callback"
+  "https://frikkie-stock-import-production.up.railway.app/auth/callback",
+  "https://frikkie-stock-import-production.up.railway.app/auth/shopify/callback",
+  "https://frikkie-stock-import-production.up.railway.app/api/auth/callback"
 ]
 
 [webhooks]
