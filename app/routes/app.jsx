@@ -2,7 +2,7 @@ import { Link, Outlet, useLoaderData, useRouteError } from "@remix-run/react";
 import { boundary } from "@shopify/shopify-app-remix/server";
 import { AppProvider } from "@shopify/shopify-app-remix/react";
 import { AppProvider as PolarisAppProvider } from "@shopify/polaris";
-import polarisTranslations from "@shopify/polaris/locales/en.json";
+import polarisTranslations from "@shopify/polaris/locales/en.json" with { type: "json" };
 import { NavMenu } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 
