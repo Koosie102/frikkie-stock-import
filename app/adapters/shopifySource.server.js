@@ -57,6 +57,13 @@ export function mapShopifyProduct(product, sourceDomain) {
     descriptionHtml: product.body_html,
     images,
     variantsJson,
-    tags: (product.tags || "").split(",").map((t) => t.trim()).filter(Boolean),
+    tags: normalizeTags(product.tags),
   };
+}
+
+function normalizeTags(tags) {
+  if (Array.isArray(tags)) {
+    return tags.map((t) => String(t).trim()).filter(Boolean);
+  }
+  return (tags || "").split(",").map((t) => t.trim()).filter(Boolean);
 }
