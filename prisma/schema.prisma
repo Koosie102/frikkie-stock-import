@@ -1,0 +1,102 @@
+// Prisma schema for Frikkie's Stock Importer
+// Uses Postgres on Railway. Run `npx prisma migrate dev` locally against a
+// Railway-provisioned DATABASE_URL, or `npx prisma migrate deploy` in prod.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Required by @shopify/shopify-app-session-storage-prisma
+model Session {
+  id            String    @id
+  shop          String
+  state         String
+  isOnline      Boolean   @default(false)
+  scope         String?
+  expires       DateTime?
+  accessToken   String
+  userId        BigInt?
+  firstName     String?
+  lastName      String?
+  email         String?
+  accountOwner  Boolean   @default(false)
+  locale        String?
+  collaborator  Boolean?  @default(false)
+  emailVerified Boolean?  @default(false)
+}
+
+enum Source {
+  STEDI
+  BUSHDOOF
+  ULTRA_VISION
+  ALTIQ
+}
+
+enum ImportStatus {
+  NEW
+  MATCHED
+  UNMATCHED
+  ESTIMATED_PRICE
+  NEEDS_REVIEW
+  PUSHED
+}
+
+// One row per scrape/fetch run, so each source's history and job status
+// (mirrors the "Logs" / "current item being processed" pattern from the
+// STEDI Import Manager) is queryable from a single table instead of one
+// SQLite file per tool.
+model ImportRun {
+  id          String   @id @default(cuid())
+  source      Source
+  status      String   @default("running") // running | done | failed
+  totalFound  Int      @default(0)
+  totalDone   Int      @default(0)
+  startedAt   DateTime @default(now())
+  finishedAt  DateTime?
+  errorLog    String?  @db.Text
+  items       StagedProduct[]
+}
+
+// A scraped/fetched product before (or after) it's pushed to Shopify.
+// Shared shape across STEDI / Bushdoof / Ultra Vision / ALTIQ so the
+// admin UI can use one table component for all four source tabs.
+model StagedProduct {
+  id               String       @id @default(cuid())
+  runId            String
+  run              ImportRun    @relation(fields: [runId], references: [id])
+  source           Source
+  sourceUrl        String?
+  sku              String?
+  title            String
+  descriptionHtml  String?      @db.Text
+  costForeign      Float?       // supplier cost in source currency (AUD/USD)
+  costZar          Float?
+  retailZar        Float?
+  marginPct        Float?
+  priceIsEstimated Boolean      @default(false)
+  weightKg         Float?
+  tags             String[]     @default([])
+  images           String[]     @default([])
+  variantsJson     Json?        // grouped/configurable product children, if any
+  status           ImportStatus @default(NEW)
+  shopifyProductId String?
+  matchedShopifyId String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@index([runId])
+  @@index([source, status])
+}
+
+// Per-source settings (pricing multipliers, tag map overrides, credentials
+// that aren't Shopify's own) — replaces each old app's local settings.json.
+model SourceSettings {
+  source        Source  @id
+  settingsJson  Json
+  updatedAt     DateTime @updatedAt
+}

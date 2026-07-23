@@ -1,0 +1,57 @@
+{
+  "name": "frikkies-stock-importer",
+  "private": true,
+  "scripts": {
+    "build": "remix vite:build",
+    "dev": "shopify app dev",
+    "start": "remix-serve ./build/server/index.js",
+    "docker-start": "npm run setup && npm run start",
+    "setup": "prisma generate && prisma migrate deploy",
+    "lint": "eslint --cache --cache-location ./node_modules/.cache/eslint .",
+    "prisma": "prisma"
+  },
+  "type": "module",
+  "engines": {
+    "node": "^18.20 || ^20.10 || >=21.0.0"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.19.1",
+    "@remix-run/dev": "^2.11.2",
+    "@remix-run/node": "^2.11.2",
+    "@remix-run/react": "^2.11.2",
+    "@remix-run/serve": "^2.11.2",
+    "@shopify/app-bridge-react": "^4.1.6",
+    "@shopify/polaris": "^12.27.0",
+    "@shopify/shopify-app-remix": "^3.4.0",
+    "@shopify/shopify-app-session-storage-prisma": "^5.1.5",
+    "cheerio": "^1.0.0",
+    "isbot": "^5.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@remix-run/eslint-config": "^2.11.2",
+    "@shopify/api-codegen-preset": "^1.1.1",
+    "@types/eslint": "^8.40.0",
+    "@types/node": "^22.2.0",
+    "@types/react": "^18.2.31",
+    "@types/react-dom": "^18.2.14",
+    "eslint": "^8.42.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.2.4",
+    "prisma": "^5.19.1",
+    "typescript": "^5.2.2",
+    "vite": "^5.4.11",
+    "vite-tsconfig-paths": "^4.3.1"
+  },
+  "workspaces": [
+    "extensions/*"
+  ],
+  "trustedDependencies": [
+    "@shopify/plugin-cloudflare"
+  ],
+  "resolutions": {
+    "undici": "6.13.0"
+  },
+  "author": "Coenraad"
+}
