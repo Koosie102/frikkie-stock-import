@@ -46,20 +46,23 @@ export const action = async ({ request }) => {
       where: { id: run.id },
       data: { status: "done", totalFound: products.length, totalDone: products.length, finishedAt: new Date() },
     });
+
+    return { ok: true, count: products.length };
   } catch (err) {
+    console.error("ALTIQ import failed:", err);
     await db.importRun.update({
       where: { id: run.id },
       data: { status: "failed", errorLog: String(err), finishedAt: new Date() },
     });
+    return { ok: false, error: String(err) };
   }
-
-  return null;
 };
 
 export default function AltiqSource() {
   const { staged } = useLoaderData();
   const fetcher = useFetcher();
   const running = fetcher.state !== "idle";
+  const result = fetcher.data;
 
   return (
     <Page title="ALTIQ Import">
@@ -70,6 +73,16 @@ export default function AltiqSource() {
           still needs to be matched in manually by SKU — that portal is
           password-protected, so it can't be scraped automatically.
         </Banner>
+        {result?.ok === false && (
+          <Banner tone="critical" title="Fetch failed">
+            {result.error}
+          </Banner>
+        )}
+        {result?.ok === true && (
+          <Banner tone="success" title="Fetch complete">
+            {`Staged ${result.count} products.`}
+          </Banner>
+        )}
         <Card>
           <BlockStack gap="300">
             <Text as="h2" variant="headingMd">
