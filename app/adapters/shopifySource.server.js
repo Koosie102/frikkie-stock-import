@@ -38,17 +38,34 @@ export async function fetchAllProducts(storeDomain) {
 // costForeign is left null here — Bushdoof/ALTIQ costs come from a
 // distributor pricelist or manual trade-portal export, matched in by SKU
 // in a separate step (same as the original Bushdoof script's pricing pass).
-export function mapShopifyProduct(product, sourceDomain) {
+//
+// retailMultiplier: ALTIQ uses AUD retail x24.5 for a first-pass ZAR price
+// (per Coenraad, easiest reference for the importer — no cost/margin math).
+export function mapShopifyProduct(product, sourceDomain, retailMultiplier = 24.5) {
   const images = (product.images || []).map((img) => img.src);
 
-  const variantsJson = product.variants.map((v) => ({
+  // Real Shopify option names (e.g. "Color", "Size") — needed to rebuild
+  // productOptions correctly when pushing via the productSet mutation.
+  // A single-variant product with no real options reports one option
+  // named "Title" with the single value "Default Title" — treat that as
+  // "no options" rather than building a pointless Title dropdown.
+  const rawOptionNames = (product.options || []).map((o) => o.name);
+  const hasRealOptions = !(
+    rawOptionNames.length === 1 && rawOptionNames[0] === "Title"
+  );
+  const optionNames = hasRealOptions ? rawOptionNames : [];
+
+  const variants = product.variants.map((v) => ({
     sku: v.sku,
     title: v.title,
     priceForeign: parseFloat(v.price),
+    retailZar: Math.round(parseFloat(v.price) * retailMultiplier * 100) / 100,
     option1: v.option1,
     option2: v.option2,
     option3: v.option3,
   }));
+
+  const firstPrice = variants[0]?.priceForeign;
 
   return {
     sourceUrl: `https://${sourceDomain}/products/${product.handle}`,
@@ -56,8 +73,10 @@ export function mapShopifyProduct(product, sourceDomain) {
     title: product.title,
     descriptionHtml: product.body_html,
     images,
-    variantsJson,
+    variantsJson: { optionNames, variants },
     tags: normalizeTags(product.tags),
+    retailZar: firstPrice != null ? Math.round(firstPrice * retailMultiplier * 100) / 100 : null,
+    priceIsEstimated: false,
   };
 }
 
