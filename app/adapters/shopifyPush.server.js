@@ -48,11 +48,14 @@ export async function pushStagedProduct(admin, staged) {
     }));
   } else {
     // No real options — single default variant, no optionValues needed.
+    // Use the edited product-level retail price if set, since that's what
+    // the review table lets you override; fall back to the original
+    // per-variant computed price otherwise.
     const v = variants[0] || {};
     productSet.variants = [
       {
         sku: v.sku || undefined,
-        price: v.retailZar,
+        price: staged.retailZar ?? v.retailZar,
       },
     ];
   }
