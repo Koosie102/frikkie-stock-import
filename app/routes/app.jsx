@@ -26,6 +26,7 @@ export default function App() {
           <Link to="/app/bushdoof">Bushdoof</Link>
           <Link to="/app/ultra-vision">Ultra Vision</Link>
           <Link to="/app/altiq">ALTIQ</Link>
+          <Link to="/app/trailbait">TrailBait</Link>
           <Link to="/app/settings">Settings</Link>
         </NavMenu>
         <Outlet />

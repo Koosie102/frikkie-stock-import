@@ -35,6 +35,7 @@ enum Source {
   BUSHDOOF
   ULTRA_VISION
   ALTIQ
+  TRAILBAIT
 }
 
 enum ImportStatus {
@@ -63,8 +64,8 @@ model ImportRun {
 }
 
 // A scraped/fetched product before (or after) it's pushed to Shopify.
-// Shared shape across STEDI / Bushdoof / Ultra Vision / ALTIQ so the
-// admin UI can use one table component for all four source tabs.
+// Shared shape across STEDI / Bushdoof / Ultra Vision / ALTIQ / TrailBait
+// so the admin UI can use one table component for every source tab.
 model StagedProduct {
   id               String       @id @default(cuid())
   runId            String

@@ -8,6 +8,7 @@ const SOURCES = [
   { key: "BUSHDOOF", label: "Bushdoof", path: "/app/bushdoof", note: "Shopify products.json" },
   { key: "ULTRA_VISION", label: "Ultra Vision", path: "/app/ultra-vision", note: "WooCommerce + pricelist" },
   { key: "ALTIQ", label: "ALTIQ", path: "/app/altiq", note: "Shopify products.json" },
+  { key: "TRAILBAIT", label: "TrailBait", path: "/app/trailbait", note: "Shopify products.json" },
 ];
 
 export const loader = async ({ request }) => {

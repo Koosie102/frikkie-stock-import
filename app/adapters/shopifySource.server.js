@@ -41,7 +41,13 @@ export async function fetchAllProducts(storeDomain) {
 //
 // retailMultiplier: ALTIQ uses AUD retail x24.5 for a first-pass ZAR price
 // (per Coenraad, easiest reference for the importer — no cost/margin math).
-export function mapShopifyProduct(product, sourceDomain, retailMultiplier = 24.5) {
+//
+// pricingFn: optional override for sources that have their own formula
+// instead of a flat multiplier (e.g. TrailBait uses the STEDI-style
+// "retail = price x24 rounded up to nearest R99, cost = retail x0.6").
+// Signature: (priceForeign) => { retailZar, costZar, priceIsEstimated }.
+// When omitted, falls back to the flat-multiplier behaviour above.
+export function mapShopifyProduct(product, sourceDomain, retailMultiplier = 24.5, pricingFn = null) {
   const images = (product.images || []).map((img) => img.src);
 
   // Real Shopify option names (e.g. "Color", "Size") — needed to rebuild
@@ -55,17 +61,26 @@ export function mapShopifyProduct(product, sourceDomain, retailMultiplier = 24.5
   );
   const optionNames = hasRealOptions ? rawOptionNames : [];
 
-  const variants = product.variants.map((v) => ({
-    sku: v.sku,
-    title: v.title,
-    priceForeign: parseFloat(v.price),
-    retailZar: Math.round(parseFloat(v.price) * retailMultiplier * 100) / 100,
-    option1: v.option1,
-    option2: v.option2,
-    option3: v.option3,
-  }));
+  const priceOf = (priceForeign) =>
+    pricingFn ? pricingFn(priceForeign) : { retailZar: Math.round(priceForeign * retailMultiplier * 100) / 100 };
+
+  const variants = product.variants.map((v) => {
+    const priceForeign = parseFloat(v.price);
+    const { retailZar, costZar } = priceOf(priceForeign);
+    return {
+      sku: v.sku,
+      title: v.title,
+      priceForeign,
+      retailZar,
+      costZar,
+      option1: v.option1,
+      option2: v.option2,
+      option3: v.option3,
+    };
+  });
 
   const firstPrice = variants[0]?.priceForeign;
+  const firstPricing = firstPrice != null ? priceOf(firstPrice) : {};
 
   return {
     sourceUrl: `https://${sourceDomain}/products/${product.handle}`,
@@ -75,8 +90,9 @@ export function mapShopifyProduct(product, sourceDomain, retailMultiplier = 24.5
     images,
     variantsJson: { optionNames, variants },
     tags: normalizeTags(product.tags),
-    retailZar: firstPrice != null ? Math.round(firstPrice * retailMultiplier * 100) / 100 : null,
-    priceIsEstimated: false,
+    retailZar: firstPricing.retailZar ?? null,
+    costZar: firstPricing.costZar ?? null,
+    priceIsEstimated: firstPricing.priceIsEstimated ?? false,
   };
 }
 

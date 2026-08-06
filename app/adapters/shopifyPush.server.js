@@ -11,13 +11,25 @@ const PRODUCT_SET_MUTATION = `#graphql
   }
 `;
 
+// Maps a Source enum value to the vendor name that should land on the
+// Shopify product. Was hardcoded to "ALTIQ" previously, which silently
+// mislabeled every other source's pushed products — caught while adding
+// TrailBait as a 5th source.
+const VENDOR_NAMES = {
+  STEDI: "STEDI",
+  BUSHDOOF: "Bushdoof",
+  ULTRA_VISION: "Ultra Vision",
+  ALTIQ: "ALTIQ",
+  TRAILBAIT: "TrailBait",
+};
+
 export async function pushStagedProduct(admin, staged) {
   const { optionNames = [], variants = [] } = staged.variantsJson || {};
 
   const productSet = {
     title: staged.title,
     descriptionHtml: staged.descriptionHtml || "",
-    vendor: "ALTIQ",
+    vendor: VENDOR_NAMES[staged.source] || staged.source,
     status: "DRAFT",
     tags: staged.tags || [],
   };
