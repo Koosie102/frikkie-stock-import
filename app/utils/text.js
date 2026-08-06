@@ -1,23 +1,32 @@
 // Shared text helpers for product titles across all sources.
 
-// Title-cases a string while preserving likely acronyms/alphanumeric codes
-// (LED, 4WD, 12V, RGB, etc.) so we don't mangle them into "Led" or "4wd".
-// Heuristic: leave a word untouched if it contains a digit, or if it's
-// already all-uppercase and short (<=5 chars, likely an acronym).
+// Common acronyms/codes seen in these catalogs that a pure heuristic can't
+// reliably distinguish from ordinary words (e.g. RGBW vs MOUNT are both
+// "short-ish all-caps" but only one is a code). Checked case-insensitively
+// against a word's letters-only core.
+const KNOWN_ACRONYMS = new Set([
+  "led", "leds", "rgb", "rgbw", "rgba", "uhf", "usb", "gvm", "arb", "diy",
+  "oem", "gps", "hid", "pwm", "can", "lcd", "uv", "ac", "dc", "fcs", "ip",
+]);
+
+function capitalizeRun(run) {
+  if (KNOWN_ACRONYMS.has(run.toLowerCase())) return run.toUpperCase();
+  if (run === run.toUpperCase() && run.length <= 3) return run;
+  return run.charAt(0).toUpperCase() + run.slice(1).toLowerCase();
+}
+
+// Title-cases a string while preserving likely acronyms/codes (LED, RGBW,
+// 12V, UHF, etc.). Operates on each contiguous run of letters within a
+// token rather than the token as a whole, so punctuation-joined titles
+// ("'Angry Eye™'", "Jimny/Tray") capitalize every real word instead of
+// just the token's first character. A whole token is left untouched if
+// it contains a digit (12V, 2018+, CX6™ all stay exactly as scraped).
 export function toTitleCase(str) {
   return (str || "")
     .trim()
     .split(/\s+/)
     .filter(Boolean)
-    .map((word) => {
-      // Strip a trailing ™/®/© from the acronym check so "LED™" still
-      // counts as a 3-letter acronym, not a 4-character regular word.
-      const core = word.replace(/[™®©]+$/, "");
-      if (/\d/.test(core) || (core === core.toUpperCase() && core.length <= 3)) {
-        return word;
-      }
-      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-    })
+    .map((word) => (/\d/.test(word) ? word : word.replace(/[A-Za-z]+/g, capitalizeRun)))
     .join(" ");
 }
 
