@@ -7,6 +7,8 @@
 // cost still comes from the ultradealer.com.au B2B portal manually,
 // since that's password-protected and not scriptable.
 
+import { formatProductTitle } from "../utils/text";
+
 const PAGE_SIZE = 250;
 
 export async function fetchAllProducts(storeDomain) {
@@ -47,7 +49,12 @@ export async function fetchAllProducts(storeDomain) {
 // "retail = price x24 rounded up to nearest R99, cost = retail x0.6").
 // Signature: (priceForeign) => { retailZar, costZar, priceIsEstimated }.
 // When omitted, falls back to the flat-multiplier behaviour above.
-export function mapShopifyProduct(product, sourceDomain, retailMultiplier = 24.5, pricingFn = null) {
+//
+// titlePrefix: brand name in caps (e.g. "STEDI", "TRAILBAIT") to prepend
+// to every title, title-casing the rest — "Duel Connector Wiring Harness"
+// becomes "STEDI Duel Connector Wiring Harness". Omit to leave the
+// source's own title untouched.
+export function mapShopifyProduct(product, sourceDomain, retailMultiplier = 24.5, pricingFn = null, titlePrefix = null) {
   const images = (product.images || []).map((img) => img.src);
 
   // Real Shopify option names (e.g. "Color", "Size") — needed to rebuild
@@ -85,7 +92,7 @@ export function mapShopifyProduct(product, sourceDomain, retailMultiplier = 24.5
   return {
     sourceUrl: `https://${sourceDomain}/products/${product.handle}`,
     sku: product.variants?.[0]?.sku || null,
-    title: product.title,
+    title: titlePrefix ? formatProductTitle(titlePrefix, product.title) : product.title,
     descriptionHtml: product.body_html,
     images,
     variantsJson: { optionNames, variants },

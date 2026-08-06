@@ -34,6 +34,20 @@ export async function pushStagedProduct(admin, staged) {
     tags: staged.tags || [],
   };
 
+  if (staged.images?.length) {
+    // Shopify fetches each URL server-side and hosts it on this store's own
+    // CDN — the source's own image URLs (already public, from their own
+    // Shopify/CDN) work directly as originalSource, no upload step needed.
+    // Product-level only for now (first becomes the featured image); a
+    // later pass could match each URL to its variant like the old
+    // Ultra Vision Import Manager did, using image_id from the source data.
+    productSet.files = staged.images.map((url) => ({
+      originalSource: url,
+      contentType: "IMAGE",
+      alt: staged.title,
+    }));
+  }
+
   if (optionNames.length > 0) {
     // Build each option's distinct value list from the variants, in order.
     productSet.productOptions = optionNames.map((name, idx) => {

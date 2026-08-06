@@ -21,8 +21,11 @@ import { fetchAllProducts, mapShopifyProduct } from "../adapters/shopifySource.s
 import { pushStagedProduct } from "../adapters/shopifyPush.server";
 import { matchSkusToShopify } from "../adapters/shopifyMatch.server";
 import { productIdToAdminPath } from "../utils/shopify";
+import { buildStagedQuery } from "../utils/stagedQuery.server";
 
 const TRAILBAIT_DOMAIN = "trailbait.com.au";
+const TRAILBAIT_BRAND = "TRAILBAIT";
+const TRAILBAIT_LOGO = "https://trailbait.com.au/cdn/shop/files/LOGO3_FC_1200x1200.jpg?v=1669804969";
 
 // No distributor cost sheet for TrailBait — price off their displayed AUD
 // retail with the same markup formula used for STEDI: retail (ZAR) = AUD
@@ -41,17 +44,17 @@ const TABS = [
   { id: "pushed", label: "Pushed", filter: { status: "PUSHED" } },
 ];
 
+// Column order shared by headings/sortable/onSort below — index-aligned.
+// null = not sortable (Source Price lives in variantsJson, not a real
+// column; Variants/Status/In Shopify aren't meaningful to sort by).
+const SORT_FIELDS = ["title", "sku", null, null, "costZar", "retailZar", null, null];
+
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
   const url = new URL(request.url);
-  const tabId = url.searchParams.get("tab") || "all";
-  const tab = TABS.find((t) => t.id === tabId) || TABS[0];
+  const { where, orderBy, tabId, q, sortField, sortDir } = buildStagedQuery("TRAILBAIT", url, TABS);
 
-  const staged = await db.stagedProduct.findMany({
-    where: { source: "TRAILBAIT", ...tab.filter },
-    orderBy: { createdAt: "desc" },
-    take: 150,
-  });
+  const staged = await db.stagedProduct.findMany({ where, orderBy, take: 150 });
 
   const counts = await db.stagedProduct.groupBy({
     by: ["status"],
@@ -64,7 +67,7 @@ export const loader = async ({ request }) => {
   const skus = staged.map((p) => p.sku).filter(Boolean);
   const shopifyMatches = await matchSkusToShopify(admin, skus);
 
-  return { staged, pushedCount, totalCount, tabId, shopDomain: session.shop, shopifyMatches };
+  return { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain: session.shop, shopifyMatches };
 };
 
 export const action = async ({ request }) => {
@@ -82,7 +85,7 @@ export const action = async ({ request }) => {
             data: {
               runId: run.id,
               source: "TRAILBAIT",
-              ...mapShopifyProduct(p, TRAILBAIT_DOMAIN, undefined, trailbaitPricing),
+              ...mapShopifyProduct(p, TRAILBAIT_DOMAIN, undefined, trailbaitPricing, TRAILBAIT_BRAND),
               status: "NEEDS_REVIEW",
             },
           }),
@@ -141,6 +144,7 @@ export const action = async ({ request }) => {
 
 const zar = (n) =>
   n == null ? "—" : `R${Number(n).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const aud = (n) => (n == null ? "—" : `$${Number(n).toLocaleString("en-AU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
 
 function PriceCell({ id, label, value, field, saveFetcher }) {
   const [local, setLocal] = useState(value ?? "");
@@ -170,7 +174,7 @@ function PriceCell({ id, label, value, field, saveFetcher }) {
 }
 
 export default function TrailBaitSource() {
-  const { staged, pushedCount, totalCount, tabId, shopDomain, shopifyMatches } = useLoaderData();
+  const { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain, shopifyMatches } = useLoaderData();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetchFetcher = useFetcher();
   const pushFetcher = useFetcher();
@@ -180,21 +184,55 @@ export default function TrailBaitSource() {
   const fetchResult = fetchFetcher.data;
   const pushResult = pushFetcher.data;
 
+  const [searchInput, setSearchInput] = useState(q);
+  useEffect(() => setSearchInput(q), [q]);
+
   const resourceName = { singular: "product", plural: "products" };
   const { selectedResources, allResourcesSelected, handleSelectionChange } = useIndexResourceState(staged);
 
   const selectedTabIndex = TABS.findIndex((t) => t.id === tabId);
 
+  function updateParams(mutate) {
+    const params = new URLSearchParams(searchParams);
+    mutate(params);
+    setSearchParams(params);
+  }
+
+  function runSearch(e) {
+    e.preventDefault();
+    updateParams((params) => {
+      if (searchInput) params.set("q", searchInput);
+      else params.delete("q");
+    });
+  }
+
+  function handleSort(headingIndex, direction) {
+    const field = SORT_FIELDS[headingIndex];
+    if (!field) return;
+    updateParams((params) => {
+      params.set("sort", field);
+      params.set("dir", direction === "ascending" ? "asc" : "desc");
+    });
+  }
+
+  const sortColumnIndex = sortField ? SORT_FIELDS.indexOf(sortField) : undefined;
+  const sortDirection = sortDir === "asc" ? "ascending" : "descending";
+
   return (
-    <Page title="TrailBait Import">
+    <Page
+      title="TrailBait Import"
+      titleMetadata={<img src={TRAILBAIT_LOGO} alt="TrailBait" style={{ height: 24, borderRadius: 4 }} />}
+    >
       <BlockStack gap="400">
         <Banner tone="info">
           Pulls the live TrailBait catalog from trailbait.com.au/products.json
-          (their storefront also runs on Shopify, so no scraping needed) and
-          prices at AUD retail x24, rounded up to the nearest R99 — same
-          formula as STEDI, since there's no distributor cost sheet. Edit
-          Retail/Cost inline below before pushing — pushed products land as
-          Drafts, so nothing goes live automatically.
+          (their storefront also runs on Shopify, so no scraping needed),
+          formats titles as "TRAILBAIT Title Cased Rest", and prices at AUD
+          retail x24, rounded up to the nearest R99 — same formula as STEDI,
+          since there's no distributor cost sheet. Edit Retail/Cost inline
+          below before pushing. Pushed products bring their description and
+          images across automatically and land as Drafts, so nothing goes
+          live without review.
         </Banner>
 
         {fetchResult?.mode === "fetch" && fetchResult.ok === false && (
@@ -235,12 +273,30 @@ export default function TrailBaitSource() {
           <Tabs
             tabs={TABS.map((t) => ({ id: t.id, content: t.label }))}
             selected={selectedTabIndex === -1 ? 0 : selectedTabIndex}
-            onSelect={(index) => {
-              const params = new URLSearchParams(searchParams);
-              params.set("tab", TABS[index].id);
-              setSearchParams(params);
-            }}
+            onSelect={(index) => updateParams((params) => params.set("tab", TABS[index].id))}
           />
+          <div style={{ padding: "12px 16px 0" }}>
+            <form onSubmit={runSearch}>
+              <InlineStack gap="200" blockAlign="end">
+                <div style={{ minWidth: 260 }}>
+                  <TextField
+                    label="Search by title or SKU"
+                    labelHidden
+                    placeholder="Search by title or SKU"
+                    value={searchInput}
+                    onChange={setSearchInput}
+                    autoComplete="off"
+                    clearButton
+                    onClearButtonClick={() => {
+                      setSearchInput("");
+                      updateParams((params) => params.delete("q"));
+                    }}
+                  />
+                </div>
+                <Button submit>Search</Button>
+              </InlineStack>
+            </form>
+          </div>
           <pushFetcher.Form method="post">
             <input type="hidden" name="intent" value="push" />
             {selectedResources.map((id) => (
@@ -256,9 +312,14 @@ export default function TrailBaitSource() {
               itemCount={staged.length}
               selectedItemsCount={allResourcesSelected ? "All" : selectedResources.length}
               onSelectionChange={handleSelectionChange}
+              sortable={[true, true, false, false, true, true, false, false]}
+              sortColumnIndex={sortColumnIndex === -1 ? undefined : sortColumnIndex}
+              sortDirection={sortField ? sortDirection : undefined}
+              onSort={handleSort}
               headings={[
                 { title: "Title" },
                 { title: "SKU" },
+                { title: "Price (AUD)" },
                 { title: "Variants" },
                 { title: "Cost (ZAR)" },
                 { title: "Retail (ZAR)" },
@@ -268,6 +329,7 @@ export default function TrailBaitSource() {
             >
               {staged.map((p, index) => {
                 const variantCount = p.variantsJson?.variants?.length || 0;
+                const sourcePrice = p.variantsJson?.variants?.[0]?.priceForeign;
                 const match = p.sku ? shopifyMatches[p.sku] : null;
                 const sourceHref = p.status === "PUSHED"
                   ? `https://${shopDomain}${productIdToAdminPath(p.shopifyProductId) || ""}`
@@ -281,6 +343,7 @@ export default function TrailBaitSource() {
                       </Link>
                     </IndexTable.Cell>
                     <IndexTable.Cell>{p.sku || "—"}</IndexTable.Cell>
+                    <IndexTable.Cell>{aud(sourcePrice)}</IndexTable.Cell>
                     <IndexTable.Cell>{variantCount || 1}</IndexTable.Cell>
                     <IndexTable.Cell>
                       <PriceCell id={p.id} label="Cost" value={p.costZar} field="costZar" saveFetcher={priceFetcher} />
