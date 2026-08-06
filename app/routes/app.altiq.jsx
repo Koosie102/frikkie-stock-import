@@ -19,7 +19,8 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { fetchAllProducts, mapShopifyProduct } from "../adapters/shopifySource.server";
 import { pushStagedProduct } from "../adapters/shopifyPush.server";
-import { matchSkusToShopify, productIdToAdminPath } from "../adapters/shopifyMatch.server";
+import { matchSkusToShopify } from "../adapters/shopifyMatch.server";
+import { productIdToAdminPath } from "../utils/shopify";
 
 const ALTIQ_DOMAIN = "altiq.com.au";
 const RETAIL_MULTIPLIER = 24.5;

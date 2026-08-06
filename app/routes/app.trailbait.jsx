@@ -19,7 +19,8 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { fetchAllProducts, mapShopifyProduct } from "../adapters/shopifySource.server";
 import { pushStagedProduct } from "../adapters/shopifyPush.server";
-import { matchSkusToShopify, productIdToAdminPath } from "../adapters/shopifyMatch.server";
+import { matchSkusToShopify } from "../adapters/shopifyMatch.server";
+import { productIdToAdminPath } from "../utils/shopify";
 
 const TRAILBAIT_DOMAIN = "trailbait.com.au";
 

@@ -47,10 +47,3 @@ export async function matchSkusToShopify(admin, skus) {
 
   return matches;
 }
-
-// Converts a Shopify GID (gid://shopify/Product/123456) into the numeric
-// admin URL path, since that's what the classic /admin/products/ link needs.
-export function productIdToAdminPath(gid) {
-  const numeric = gid?.split("/").pop();
-  return numeric ? `/admin/products/${numeric}` : null;
-}
