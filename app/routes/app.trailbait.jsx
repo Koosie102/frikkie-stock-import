@@ -23,6 +23,7 @@ import { matchSkusToShopify } from "../adapters/shopifyMatch.server";
 import { productIdToAdminPath } from "../utils/shopify";
 import { buildStagedQuery } from "../utils/stagedQuery.server";
 import { upsertStagedProducts } from "../utils/stagedUpsert.server";
+import { recalculateStagedPrices } from "../utils/recalcPricing.server";
 import { getSourceSettings, saveSourceSettings } from "../utils/sourceSettings.server";
 
 const TRAILBAIT_DOMAIN = "trailbait.com.au";
@@ -126,7 +127,10 @@ export const action = async ({ request }) => {
       return { ok: false, mode: "updateSettings", error: "Cost ratio must be a number between 0 and 1 (e.g. 0.6 for 60%)." };
     }
     await saveSourceSettings(db, "TRAILBAIT", { sourceMultiplier, costRatio });
-    return { ok: true, mode: "updateSettings" };
+    const updated = await recalculateStagedPrices(db, "TRAILBAIT", (price) =>
+      trailbaitPricing(price, { sourceMultiplier, costRatio }),
+    );
+    return { ok: true, mode: "updateSettings", updated };
   }
 
   if (intent === "push") {
@@ -195,16 +199,15 @@ function PricingFormulaCard({ settings }) {
         <Text as="h2" variant="headingMd">Pricing formula</Text>
         <Text as="p" tone="subdued">
           Retail (ZAR) = AUD price × multiplier, rounded up to the nearest
-          R99. Cost (ZAR) = Retail × cost ratio. Applies to the next fetch
-          — products already staged keep their current price until you
-          edit them individually or re-fetch (which won't touch an
-          already edited price).
+          R99. Cost (ZAR) = Retail × cost ratio. Saving recalculates
+          every un-pushed staged product's price with the new formula —
+          products already pushed to Shopify are left untouched.
         </Text>
         {result?.mode === "updateSettings" && result.ok === false && (
           <Banner tone="critical">{result.error}</Banner>
         )}
         {result?.mode === "updateSettings" && result.ok === true && (
-          <Banner tone="success">Saved.</Banner>
+          <Banner tone="success">{`Saved. Recalculated ${result.updated} un-pushed product(s).`}</Banner>
         )}
         <settingsFetcher.Form method="post">
           <input type="hidden" name="intent" value="updateSettings" />
@@ -326,12 +329,17 @@ export default function TrailBaitSource() {
           <BlockStack gap="300">
             <InlineStack align="space-between">
               <Text as="h2" variant="headingMd">Fetch catalog</Text>
-              <fetchFetcher.Form method="post">
-                <input type="hidden" name="intent" value="fetch" />
-                <Button submit loading={fetching} variant="primary">
-                  {fetching ? "Fetching…" : "Fetch TrailBait products"}
+              <InlineStack gap="200">
+                <Button url={`/app/export/TRAILBAIT?tab=${tabId}${q ? `&q=${encodeURIComponent(q)}` : ""}`} external>
+                  Export CSV
                 </Button>
-              </fetchFetcher.Form>
+                <fetchFetcher.Form method="post">
+                  <input type="hidden" name="intent" value="fetch" />
+                  <Button submit loading={fetching} variant="primary">
+                    {fetching ? "Fetching…" : "Fetch TrailBait products"}
+                  </Button>
+                </fetchFetcher.Form>
+              </InlineStack>
             </InlineStack>
             <Text as="p" tone="subdued">
               {`${totalCount} total staged, ${pushedCount} already pushed`}

@@ -23,6 +23,7 @@ import { matchSkusToShopify } from "../adapters/shopifyMatch.server";
 import { productIdToAdminPath } from "../utils/shopify";
 import { buildStagedQuery } from "../utils/stagedQuery.server";
 import { upsertStagedProducts } from "../utils/stagedUpsert.server";
+import { recalculateStagedPrices } from "../utils/recalcPricing.server";
 import { getSourceSettings, saveSourceSettings } from "../utils/sourceSettings.server";
 
 const ALTIQ_DOMAIN = "altiq.com.au";
@@ -35,6 +36,10 @@ const ALTIQ_LOGO = "https://altiq.com.au/cdn/shop/files/Altiq_Wordmark_Icon_Reve
 // Editable via the Pricing formula card below — persisted in
 // SourceSettings, these are just the fallback if nothing's been saved yet.
 const DEFAULT_SETTINGS = { retailMultiplier: 24.5 };
+
+function altiqPricing(priceForeign, settings) {
+  return { retailZar: Math.round(priceForeign * settings.retailMultiplier * 100) / 100 };
+}
 
 const TABS = [
   { id: "all", label: "All", filter: {} },
@@ -78,7 +83,7 @@ export const action = async ({ request }) => {
     try {
       const products = await fetchAllProducts(ALTIQ_DOMAIN);
       const mapped = products.map((p) =>
-        mapShopifyProduct(p, ALTIQ_DOMAIN, settings.retailMultiplier, null, ALTIQ_BRAND),
+        mapShopifyProduct(p, ALTIQ_DOMAIN, undefined, (price) => altiqPricing(price, settings), ALTIQ_BRAND),
       );
       const { created, updated } = await upsertStagedProducts(db, run.id, "ALTIQ", mapped);
       await db.importRun.update({
@@ -116,7 +121,8 @@ export const action = async ({ request }) => {
       return { ok: false, mode: "updateSettings", error: "Retail multiplier must be a positive number." };
     }
     await saveSourceSettings(db, "ALTIQ", { retailMultiplier });
-    return { ok: true, mode: "updateSettings" };
+    const updated = await recalculateStagedPrices(db, "ALTIQ", (price) => altiqPricing(price, { retailMultiplier }));
+    return { ok: true, mode: "updateSettings", updated };
   }
 
   if (intent === "push") {
@@ -183,16 +189,15 @@ function PricingFormulaCard({ settings }) {
       <BlockStack gap="300">
         <Text as="h2" variant="headingMd">Pricing formula</Text>
         <Text as="p" tone="subdued">
-          Retail (ZAR) = AUD price × multiplier. Applies to the next fetch —
-          products already staged keep their current price until you edit
-          them individually or re-fetch (which won't touch an already
-          edited price).
+          Retail (ZAR) = AUD price × multiplier. Saving recalculates every
+          un-pushed staged product's price with the new formula —
+          products already pushed to Shopify are left untouched.
         </Text>
         {result?.mode === "updateSettings" && result.ok === false && (
           <Banner tone="critical">{result.error}</Banner>
         )}
         {result?.mode === "updateSettings" && result.ok === true && (
-          <Banner tone="success">Saved.</Banner>
+          <Banner tone="success">{`Saved. Recalculated ${result.updated} un-pushed product(s).`}</Banner>
         )}
         <settingsFetcher.Form method="post">
           <input type="hidden" name="intent" value="updateSettings" />
@@ -304,12 +309,17 @@ export default function AltiqSource() {
           <BlockStack gap="300">
             <InlineStack align="space-between">
               <Text as="h2" variant="headingMd">Fetch catalog</Text>
-              <fetchFetcher.Form method="post">
-                <input type="hidden" name="intent" value="fetch" />
-                <Button submit loading={fetching} variant="primary">
-                  {fetching ? "Fetching…" : "Fetch ALTIQ products"}
+              <InlineStack gap="200">
+                <Button url={`/app/export/ALTIQ?tab=${tabId}${q ? `&q=${encodeURIComponent(q)}` : ""}`} external>
+                  Export CSV
                 </Button>
-              </fetchFetcher.Form>
+                <fetchFetcher.Form method="post">
+                  <input type="hidden" name="intent" value="fetch" />
+                  <Button submit loading={fetching} variant="primary">
+                    {fetching ? "Fetching…" : "Fetch ALTIQ products"}
+                  </Button>
+                </fetchFetcher.Form>
+              </InlineStack>
             </InlineStack>
             <Text as="p" tone="subdued">
               {`${totalCount} total staged, ${pushedCount} already pushed`}
