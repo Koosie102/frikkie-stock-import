@@ -15,7 +15,7 @@ const PRODUCT_SET_MUTATION = `#graphql
 // Shopify product. Was hardcoded to "ALTIQ" previously, which silently
 // mislabeled every other source's pushed products — caught while adding
 // TrailBait as a 5th source.
-const VENDOR_NAMES = {
+export const VENDOR_NAMES = {
   STEDI: "STEDI",
   BUSHDOOF: "Bushdoof",
   ULTRA_VISION: "Ultra Vision",

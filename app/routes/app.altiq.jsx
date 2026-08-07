@@ -19,7 +19,9 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { fetchAllProducts, mapShopifyProduct } from "../adapters/shopifySource.server";
 import { pushStagedProduct } from "../adapters/shopifyPush.server";
-import { matchSkusToShopify } from "../adapters/shopifyMatch.server";
+import { matchSkusToShopify, syncVariantPrice, fetchVendorProducts, fuzzyMatchTitles } from "../adapters/shopifyMatch.server";
+import { summarizeVendorTags } from "../adapters/shopifyTaxonomy.server";
+import { VENDOR_NAMES } from "../adapters/shopifyPush.server";
 import { productIdToAdminPath } from "../utils/shopify";
 import { buildStagedQuery } from "../utils/stagedQuery.server";
 import { upsertStagedProducts } from "../utils/stagedUpsert.server";
@@ -69,7 +71,22 @@ export const loader = async ({ request }) => {
   const shopifyMatches = await matchSkusToShopify(admin, skus);
   const settings = await getSourceSettings(db, "ALTIQ", DEFAULT_SETTINGS);
 
-  return { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain: session.shop, shopifyMatches, settings };
+  // Only worth the extra Shopify calls if there's something unmatched to
+  // resolve — a fuzzy pass and a vendor-wide product/tag fetch are wasted
+  // work on a fully-matched or empty page.
+  const unmatched = staged.filter((p) => !p.sku || !shopifyMatches[p.sku]);
+  let fuzzyMatches = {};
+  let vendorTags = [];
+  if (unmatched.length > 0) {
+    const vendorProducts = await fetchVendorProducts(admin, VENDOR_NAMES.ALTIQ);
+    fuzzyMatches = fuzzyMatchTitles(unmatched.map((p) => ({ id: p.id, title: p.title })), vendorProducts);
+    vendorTags = summarizeVendorTags(vendorProducts);
+  }
+
+  return {
+    staged, pushedCount, totalCount, tabId, q, sortField, sortDir,
+    shopDomain: session.shop, shopifyMatches, fuzzyMatches, vendorTags, settings,
+  };
 };
 
 export const action = async ({ request }) => {
@@ -125,6 +142,25 @@ export const action = async ({ request }) => {
     return { ok: true, mode: "updateSettings", updated };
   }
 
+  if (intent === "syncPrice") {
+    const id = formData.get("id");
+    const staged = await db.stagedProduct.findUnique({ where: { id } });
+    if (!staged?.sku) {
+      return { ok: false, mode: "syncPrice", id, error: "No SKU to match against." };
+    }
+    const matches = await matchSkusToShopify(admin, [staged.sku]);
+    const match = matches[staged.sku];
+    if (!match) {
+      return { ok: false, mode: "syncPrice", id, error: "No matching Shopify product found." };
+    }
+    try {
+      await syncVariantPrice(admin, match.productId, match.variantId, staged.retailZar);
+      return { ok: true, mode: "syncPrice", id };
+    } catch (err) {
+      return { ok: false, mode: "syncPrice", id, error: String(err.message || err) };
+    }
+  }
+
   if (intent === "push") {
     const ids = formData.getAll("ids");
     let pushed = 0;
@@ -178,6 +214,48 @@ function PriceCell({ id, label, value, field, saveFetcher }) {
   );
 }
 
+function ShopifyMatchCell({ staged, match, fuzzyMatch, shopDomain }) {
+  const syncFetcher = useFetcher();
+  const syncing = syncFetcher.state !== "idle";
+  const syncResult = syncFetcher.data;
+
+  if (match) {
+    const priceDiffers = staged.retailZar != null && Math.round(match.price) !== Math.round(staged.retailZar);
+    return (
+      <BlockStack gap="100">
+        <Link url={`https://${shopDomain}${productIdToAdminPath(match.productId)}`} target="_blank">
+          {`${zar(match.price)} (${match.status})`}
+        </Link>
+        {priceDiffers && (
+          <syncFetcher.Form method="post">
+            <input type="hidden" name="intent" value="syncPrice" />
+            <input type="hidden" name="id" value={staged.id} />
+            <Button submit size="micro" loading={syncing}>
+              {`Sync to ${zar(staged.retailZar)}`}
+            </Button>
+          </syncFetcher.Form>
+        )}
+        {syncResult?.mode === "syncPrice" && syncResult.id === staged.id && syncResult.ok === false && (
+          <Text as="span" tone="critical">{syncResult.error}</Text>
+        )}
+      </BlockStack>
+    );
+  }
+
+  if (fuzzyMatch) {
+    return (
+      <BlockStack gap="100">
+        <Badge tone="warning">{`Possible match (${Math.round(fuzzyMatch.score * 100)}%)`}</Badge>
+        <Link url={`https://${shopDomain}${productIdToAdminPath(fuzzyMatch.productId)}`} target="_blank">
+          {fuzzyMatch.productTitle}
+        </Link>
+      </BlockStack>
+    );
+  }
+
+  return <Text as="span" tone="subdued">Not in store</Text>;
+}
+
 function PricingFormulaCard({ settings }) {
   const settingsFetcher = useFetcher();
   const saving = settingsFetcher.state !== "idle";
@@ -221,8 +299,30 @@ function PricingFormulaCard({ settings }) {
   );
 }
 
+function ShopifyTagsCard({ vendorTags }) {
+  if (!vendorTags.length) return null;
+  return (
+    <Card>
+      <BlockStack gap="300">
+        <Text as="h2" variant="headingMd">Existing Shopify tags for ALTIQ</Text>
+        <Text as="p" tone="subdued">
+          Tags already used on ALTIQ products in your store, most-used
+          first — reference for keeping newly imported tags consistent
+          with your existing collections/taxonomy rather than creating
+          near-duplicates.
+        </Text>
+        <InlineStack gap="150">
+          {vendorTags.slice(0, 40).map(({ tag, count }) => (
+            <Badge key={tag}>{`${tag} (${count})`}</Badge>
+          ))}
+        </InlineStack>
+      </BlockStack>
+    </Card>
+  );
+}
+
 export default function AltiqSource() {
-  const { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain, shopifyMatches, settings } = useLoaderData();
+  const { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain, shopifyMatches, fuzzyMatches, vendorTags, settings } = useLoaderData();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetchFetcher = useFetcher();
   const pushFetcher = useFetcher();
@@ -329,6 +429,8 @@ export default function AltiqSource() {
 
         <PricingFormulaCard settings={settings} />
 
+        <ShopifyTagsCard vendorTags={vendorTags} />
+
         <Card padding="0">
           <Tabs
             tabs={TABS.map((t) => ({ id: t.id, content: t.label }))}
@@ -415,13 +517,7 @@ export default function AltiqSource() {
                       <Badge tone={p.status === "PUSHED" ? "success" : undefined}>{p.status}</Badge>
                     </IndexTable.Cell>
                     <IndexTable.Cell>
-                      {match ? (
-                        <Link url={`https://${shopDomain}${productIdToAdminPath(match.productId)}`} target="_blank">
-                          {`${zar(match.price)} (${match.status})`}
-                        </Link>
-                      ) : (
-                        <Text as="span" tone="subdued">Not in store</Text>
-                      )}
+                      <ShopifyMatchCell staged={p} match={match} fuzzyMatch={fuzzyMatches[p.id]} shopDomain={shopDomain} />
                     </IndexTable.Cell>
                   </IndexTable.Row>
                 );
