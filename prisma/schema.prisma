@@ -92,6 +92,7 @@ model StagedProduct {
 
   @@index([runId])
   @@index([source, status])
+  @@unique([source, sourceUrl])
 }
 
 // Per-source settings (pricing multipliers, tag map overrides, credentials

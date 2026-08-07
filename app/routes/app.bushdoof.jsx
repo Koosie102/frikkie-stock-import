@@ -22,6 +22,8 @@ import { pushStagedProduct } from "../adapters/shopifyPush.server";
 import { matchSkusToShopify } from "../adapters/shopifyMatch.server";
 import { productIdToAdminPath } from "../utils/shopify";
 import { buildStagedQuery } from "../utils/stagedQuery.server";
+import { upsertStagedProducts } from "../utils/stagedUpsert.server";
+import { getSourceSettings, saveSourceSettings } from "../utils/sourceSettings.server";
 
 // Was bushdoof.com.au in the original scaffold with a TODO to confirm —
 // verified their real storefront is bushdoof.co (Shopify-hosted,
@@ -30,12 +32,17 @@ const BUSHDOOF_DOMAIN = "bushdoof.co";
 const BUSHDOOF_BRAND = "BUSHDOOF";
 const BUSHDOOF_LOGO = "https://bushdoof.co/cdn/shop/files/BD_Icon_-_3.png?v=1746064836";
 
-// Ported from the original Bushdoof Node script: AUD x 13.5 = ZAR cost,
-// cost x 1.3 = retail, rounded to the *nearest* R99 (not rounded up, per
-// the original formula — differs from STEDI/TrailBait's round-up rule).
-function bushdoofPricing(priceForeign) {
-  const costZar = Math.round(priceForeign * 13.5 * 100) / 100;
-  const rawRetail = costZar * 1.3;
+// Editable via the Pricing formula card below — persisted in
+// SourceSettings, these are just the fallback if nothing's been saved yet.
+// Cost (ZAR) = AUD price x costMultiplier. Retail (ZAR) = Cost x
+// retailMarkup, rounded to the *nearest* R99 (not rounded up, per the
+// original Bushdoof Node script's formula — differs from
+// STEDI/TrailBait's round-up rule).
+const DEFAULT_SETTINGS = { costMultiplier: 13.5, retailMarkup: 1.3 };
+
+function bushdoofPricing(priceForeign, settings) {
+  const costZar = Math.round(priceForeign * settings.costMultiplier * 100) / 100;
+  const rawRetail = costZar * settings.retailMarkup;
   const retailZar = Math.round((rawRetail + 1) / 100) * 100 - 1; // nearest X99
   return { retailZar, costZar, priceIsEstimated: true };
 }
@@ -66,8 +73,9 @@ export const loader = async ({ request }) => {
 
   const skus = staged.map((p) => p.sku).filter(Boolean);
   const shopifyMatches = await matchSkusToShopify(admin, skus);
+  const settings = await getSourceSettings(db, "BUSHDOOF", DEFAULT_SETTINGS);
 
-  return { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain: session.shop, shopifyMatches };
+  return { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain: session.shop, shopifyMatches, settings };
 };
 
 export const action = async ({ request }) => {
@@ -76,26 +84,19 @@ export const action = async ({ request }) => {
   const intent = formData.get("intent");
 
   if (intent === "fetch") {
+    const settings = await getSourceSettings(db, "BUSHDOOF", DEFAULT_SETTINGS);
     const run = await db.importRun.create({ data: { source: "BUSHDOOF", status: "running" } });
     try {
       const products = await fetchAllProducts(BUSHDOOF_DOMAIN);
-      await db.$transaction(
-        products.map((p) =>
-          db.stagedProduct.create({
-            data: {
-              runId: run.id,
-              source: "BUSHDOOF",
-              ...mapShopifyProduct(p, BUSHDOOF_DOMAIN, undefined, bushdoofPricing, BUSHDOOF_BRAND),
-              status: "NEEDS_REVIEW",
-            },
-          }),
-        ),
+      const mapped = products.map((p) =>
+        mapShopifyProduct(p, BUSHDOOF_DOMAIN, undefined, (price) => bushdoofPricing(price, settings), BUSHDOOF_BRAND),
       );
+      const { created, updated } = await upsertStagedProducts(db, run.id, "BUSHDOOF", mapped);
       await db.importRun.update({
         where: { id: run.id },
         data: { status: "done", totalFound: products.length, totalDone: products.length, finishedAt: new Date() },
       });
-      return { ok: true, mode: "fetch", count: products.length };
+      return { ok: true, mode: "fetch", created, updated };
     } catch (err) {
       console.error("Bushdoof import failed:", err);
       await db.importRun.update({
@@ -118,6 +119,19 @@ export const action = async ({ request }) => {
       },
     });
     return { ok: true, mode: "updatePrice" };
+  }
+
+  if (intent === "updateSettings") {
+    const costMultiplier = parseFloat(formData.get("costMultiplier"));
+    const retailMarkup = parseFloat(formData.get("retailMarkup"));
+    if (Number.isNaN(costMultiplier) || costMultiplier <= 0) {
+      return { ok: false, mode: "updateSettings", error: "Cost multiplier must be a positive number." };
+    }
+    if (Number.isNaN(retailMarkup) || retailMarkup <= 0) {
+      return { ok: false, mode: "updateSettings", error: "Retail markup must be a positive number." };
+    }
+    await saveSourceSettings(db, "BUSHDOOF", { costMultiplier, retailMarkup });
+    return { ok: true, mode: "updateSettings" };
   }
 
   if (intent === "push") {
@@ -173,8 +187,66 @@ function PriceCell({ id, label, value, field, saveFetcher }) {
   );
 }
 
+function PricingFormulaCard({ settings }) {
+  const settingsFetcher = useFetcher();
+  const saving = settingsFetcher.state !== "idle";
+  const result = settingsFetcher.data;
+  const [costMultiplier, setCostMultiplier] = useState(String(settings.costMultiplier));
+  const [retailMarkup, setRetailMarkup] = useState(String(settings.retailMarkup));
+
+  return (
+    <Card>
+      <BlockStack gap="300">
+        <Text as="h2" variant="headingMd">Pricing formula</Text>
+        <Text as="p" tone="subdued">
+          Cost (ZAR) = AUD price × cost multiplier. Retail (ZAR) = Cost ×
+          retail markup, rounded to the nearest R99. Applies to the next
+          fetch — products already staged keep their current price until
+          you edit them individually or re-fetch (which won't touch an
+          already edited price).
+        </Text>
+        {result?.mode === "updateSettings" && result.ok === false && (
+          <Banner tone="critical">{result.error}</Banner>
+        )}
+        {result?.mode === "updateSettings" && result.ok === true && (
+          <Banner tone="success">Saved.</Banner>
+        )}
+        <settingsFetcher.Form method="post">
+          <input type="hidden" name="intent" value="updateSettings" />
+          <InlineStack gap="200" blockAlign="end">
+            <div style={{ maxWidth: 200 }}>
+              <TextField
+                label="AUD → ZAR cost multiplier"
+                type="number"
+                step="0.1"
+                name="costMultiplier"
+                value={costMultiplier}
+                onChange={setCostMultiplier}
+                autoComplete="off"
+              />
+            </div>
+            <div style={{ maxWidth: 200 }}>
+              <TextField
+                label="Retail markup on cost"
+                helpText="e.g. 1.3 = 30% markup"
+                type="number"
+                step="0.01"
+                name="retailMarkup"
+                value={retailMarkup}
+                onChange={setRetailMarkup}
+                autoComplete="off"
+              />
+            </div>
+            <Button submit loading={saving} variant="primary">Save</Button>
+          </InlineStack>
+        </settingsFetcher.Form>
+      </BlockStack>
+    </Card>
+  );
+}
+
 export default function BushdoofSource() {
-  const { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain, shopifyMatches } = useLoaderData();
+  const { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain, shopifyMatches, settings } = useLoaderData();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetchFetcher = useFetcher();
   const pushFetcher = useFetcher();
@@ -226,20 +298,22 @@ export default function BushdoofSource() {
       <BlockStack gap="400">
         <Banner tone="info">
           Pulls the live Bushdoof catalog from bushdoof.co/products.json
-          (their storefront runs on Shopify), formats titles as "BUSHDOOF
-          Title Cased Rest", and prices at AUD x13.5 = ZAR cost, x1.3 =
-          retail, rounded to the nearest R99 — the original Bushdoof
-          script's formula. Edit Retail/Cost inline below before pushing.
-          Pushed products bring their description and images across
-          automatically and land as Drafts, so nothing goes live without
-          review.
+          (their storefront runs on Shopify) and formats titles as
+          "BUSHDOOF Title Cased Rest". Re-fetching updates existing staged
+          products (title/images/description/tags) instead of duplicating
+          them — it won't touch prices you've already edited or revert
+          anything already pushed. Pushed products bring their
+          description and images across automatically and land as
+          Drafts, so nothing goes live without review.
         </Banner>
 
         {fetchResult?.mode === "fetch" && fetchResult.ok === false && (
           <Banner tone="critical" title="Fetch failed">{fetchResult.error}</Banner>
         )}
         {fetchResult?.mode === "fetch" && fetchResult.ok === true && (
-          <Banner tone="success" title="Fetch complete">{`Staged ${fetchResult.count} products.`}</Banner>
+          <Banner tone="success" title="Fetch complete">
+            {`${fetchResult.created} new, ${fetchResult.updated} updated.`}
+          </Banner>
         )}
         {pushResult?.mode === "push" && (
           <Banner tone={pushResult.ok ? "success" : "warning"} title="Push finished">
@@ -268,6 +342,8 @@ export default function BushdoofSource() {
             </Text>
           </BlockStack>
         </Card>
+
+        <PricingFormulaCard settings={settings} />
 
         <Card padding="0">
           <Tabs

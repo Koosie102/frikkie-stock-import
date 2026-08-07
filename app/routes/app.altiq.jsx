@@ -22,14 +22,19 @@ import { pushStagedProduct } from "../adapters/shopifyPush.server";
 import { matchSkusToShopify } from "../adapters/shopifyMatch.server";
 import { productIdToAdminPath } from "../utils/shopify";
 import { buildStagedQuery } from "../utils/stagedQuery.server";
+import { upsertStagedProducts } from "../utils/stagedUpsert.server";
+import { getSourceSettings, saveSourceSettings } from "../utils/sourceSettings.server";
 
 const ALTIQ_DOMAIN = "altiq.com.au";
 const ALTIQ_BRAND = "ALTIQ";
-const RETAIL_MULTIPLIER = 24.5;
 // ALTIQ's own logo assets are "reverse" (light-on-transparent) versions
 // meant for a dark header, so it's wrapped in a dark chip below to stay
 // legible on the app's white page background.
 const ALTIQ_LOGO = "https://altiq.com.au/cdn/shop/files/Altiq_Wordmark_Icon_Reverse.png?v=1696495680&width=150";
+
+// Editable via the Pricing formula card below — persisted in
+// SourceSettings, these are just the fallback if nothing's been saved yet.
+const DEFAULT_SETTINGS = { retailMultiplier: 24.5 };
 
 const TABS = [
   { id: "all", label: "All", filter: {} },
@@ -57,8 +62,9 @@ export const loader = async ({ request }) => {
 
   const skus = staged.map((p) => p.sku).filter(Boolean);
   const shopifyMatches = await matchSkusToShopify(admin, skus);
+  const settings = await getSourceSettings(db, "ALTIQ", DEFAULT_SETTINGS);
 
-  return { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain: session.shop, shopifyMatches };
+  return { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain: session.shop, shopifyMatches, settings };
 };
 
 export const action = async ({ request }) => {
@@ -67,26 +73,19 @@ export const action = async ({ request }) => {
   const intent = formData.get("intent");
 
   if (intent === "fetch") {
+    const settings = await getSourceSettings(db, "ALTIQ", DEFAULT_SETTINGS);
     const run = await db.importRun.create({ data: { source: "ALTIQ", status: "running" } });
     try {
       const products = await fetchAllProducts(ALTIQ_DOMAIN);
-      await db.$transaction(
-        products.map((p) =>
-          db.stagedProduct.create({
-            data: {
-              runId: run.id,
-              source: "ALTIQ",
-              ...mapShopifyProduct(p, ALTIQ_DOMAIN, RETAIL_MULTIPLIER, null, ALTIQ_BRAND),
-              status: "NEW",
-            },
-          }),
-        ),
+      const mapped = products.map((p) =>
+        mapShopifyProduct(p, ALTIQ_DOMAIN, settings.retailMultiplier, null, ALTIQ_BRAND),
       );
+      const { created, updated } = await upsertStagedProducts(db, run.id, "ALTIQ", mapped);
       await db.importRun.update({
         where: { id: run.id },
         data: { status: "done", totalFound: products.length, totalDone: products.length, finishedAt: new Date() },
       });
-      return { ok: true, mode: "fetch", count: products.length };
+      return { ok: true, mode: "fetch", created, updated };
     } catch (err) {
       console.error("ALTIQ import failed:", err);
       await db.importRun.update({
@@ -109,6 +108,15 @@ export const action = async ({ request }) => {
       },
     });
     return { ok: true, mode: "updatePrice" };
+  }
+
+  if (intent === "updateSettings") {
+    const retailMultiplier = parseFloat(formData.get("retailMultiplier"));
+    if (Number.isNaN(retailMultiplier) || retailMultiplier <= 0) {
+      return { ok: false, mode: "updateSettings", error: "Retail multiplier must be a positive number." };
+    }
+    await saveSourceSettings(db, "ALTIQ", { retailMultiplier });
+    return { ok: true, mode: "updateSettings" };
   }
 
   if (intent === "push") {
@@ -164,8 +172,52 @@ function PriceCell({ id, label, value, field, saveFetcher }) {
   );
 }
 
+function PricingFormulaCard({ settings }) {
+  const settingsFetcher = useFetcher();
+  const saving = settingsFetcher.state !== "idle";
+  const result = settingsFetcher.data;
+  const [retailMultiplier, setRetailMultiplier] = useState(String(settings.retailMultiplier));
+
+  return (
+    <Card>
+      <BlockStack gap="300">
+        <Text as="h2" variant="headingMd">Pricing formula</Text>
+        <Text as="p" tone="subdued">
+          Retail (ZAR) = AUD price × multiplier. Applies to the next fetch —
+          products already staged keep their current price until you edit
+          them individually or re-fetch (which won't touch an already
+          edited price).
+        </Text>
+        {result?.mode === "updateSettings" && result.ok === false && (
+          <Banner tone="critical">{result.error}</Banner>
+        )}
+        {result?.mode === "updateSettings" && result.ok === true && (
+          <Banner tone="success">Saved.</Banner>
+        )}
+        <settingsFetcher.Form method="post">
+          <input type="hidden" name="intent" value="updateSettings" />
+          <InlineStack gap="200" blockAlign="end">
+            <div style={{ maxWidth: 200 }}>
+              <TextField
+                label="Retail multiplier"
+                type="number"
+                step="0.1"
+                name="retailMultiplier"
+                value={retailMultiplier}
+                onChange={setRetailMultiplier}
+                autoComplete="off"
+              />
+            </div>
+            <Button submit loading={saving} variant="primary">Save</Button>
+          </InlineStack>
+        </settingsFetcher.Form>
+      </BlockStack>
+    </Card>
+  );
+}
+
 export default function AltiqSource() {
-  const { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain, shopifyMatches } = useLoaderData();
+  const { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain, shopifyMatches, settings } = useLoaderData();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetchFetcher = useFetcher();
   const pushFetcher = useFetcher();
@@ -220,19 +272,22 @@ export default function AltiqSource() {
     >
       <BlockStack gap="400">
         <Banner tone="info">
-          Pulls the live ALTIQ catalog from altiq.com.au/products.json,
-          formats titles as "ALTIQ Title Cased Rest", and prices at AUD
-          retail × {RETAIL_MULTIPLIER}. Edit Retail/Cost inline below before
-          pushing. Pushed products bring their description and images
-          across automatically and land as Drafts, so nothing goes live
-          without review.
+          Pulls the live ALTIQ catalog from altiq.com.au/products.json and
+          formats titles as "ALTIQ Title Cased Rest". Re-fetching updates
+          existing staged products (title/images/description/tags) instead
+          of duplicating them — it won't touch prices you've already
+          edited or revert anything already pushed. Pushed products bring
+          their description and images across automatically and land as
+          Drafts, so nothing goes live without review.
         </Banner>
 
         {fetchResult?.mode === "fetch" && fetchResult.ok === false && (
           <Banner tone="critical" title="Fetch failed">{fetchResult.error}</Banner>
         )}
         {fetchResult?.mode === "fetch" && fetchResult.ok === true && (
-          <Banner tone="success" title="Fetch complete">{`Staged ${fetchResult.count} products.`}</Banner>
+          <Banner tone="success" title="Fetch complete">
+            {`${fetchResult.created} new, ${fetchResult.updated} updated.`}
+          </Banner>
         )}
         {pushResult?.mode === "push" && (
           <Banner tone={pushResult.ok ? "success" : "warning"} title="Push finished">
@@ -261,6 +316,8 @@ export default function AltiqSource() {
             </Text>
           </BlockStack>
         </Card>
+
+        <PricingFormulaCard settings={settings} />
 
         <Card padding="0">
           <Tabs

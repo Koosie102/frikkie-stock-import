@@ -22,19 +22,23 @@ import { pushStagedProduct } from "../adapters/shopifyPush.server";
 import { matchSkusToShopify } from "../adapters/shopifyMatch.server";
 import { productIdToAdminPath } from "../utils/shopify";
 import { buildStagedQuery } from "../utils/stagedQuery.server";
+import { upsertStagedProducts } from "../utils/stagedUpsert.server";
+import { getSourceSettings, saveSourceSettings } from "../utils/sourceSettings.server";
 
 const TRAILBAIT_DOMAIN = "trailbait.com.au";
 const TRAILBAIT_BRAND = "TRAILBAIT";
 const TRAILBAIT_LOGO = "https://trailbait.com.au/cdn/shop/files/LOGO3_FC_1200x1200.jpg?v=1669804969";
 
-// No distributor cost sheet for TrailBait — price off their displayed AUD
-// retail with the same markup formula used for STEDI: retail (ZAR) = AUD
-// price x24, rounded up to the nearest R99; cost = retail x0.6. Flagged
-// estimated since there's no real cost behind it, same as STEDI's fallback.
-function trailbaitPricing(priceForeign) {
-  const raw = priceForeign * 24;
-  const retailZar = Math.ceil((raw + 1) / 100) * 100 - 1; // round up to nearest R99 (e.g. 1400 -> 1499, 1451 -> 1499)
-  const costZar = Math.round(retailZar * 0.6 * 100) / 100;
+// Editable via the Pricing formula card below — persisted in
+// SourceSettings, these are just the fallback if nothing's been saved yet.
+// Retail (ZAR) = AUD price x sourceMultiplier, rounded up to nearest R99.
+// Cost (ZAR) = Retail x costRatio.
+const DEFAULT_SETTINGS = { sourceMultiplier: 24, costRatio: 0.6 };
+
+function trailbaitPricing(priceForeign, settings) {
+  const raw = priceForeign * settings.sourceMultiplier;
+  const retailZar = Math.ceil((raw + 1) / 100) * 100 - 1; // round up to nearest R99
+  const costZar = Math.round(retailZar * settings.costRatio * 100) / 100;
   return { retailZar, costZar, priceIsEstimated: true };
 }
 
@@ -45,8 +49,6 @@ const TABS = [
 ];
 
 // Column order shared by headings/sortable/onSort below — index-aligned.
-// null = not sortable (Source Price lives in variantsJson, not a real
-// column; Variants/Status/In Shopify aren't meaningful to sort by).
 const SORT_FIELDS = ["title", "sku", null, null, "costZar", "retailZar", null, null];
 
 export const loader = async ({ request }) => {
@@ -66,8 +68,9 @@ export const loader = async ({ request }) => {
 
   const skus = staged.map((p) => p.sku).filter(Boolean);
   const shopifyMatches = await matchSkusToShopify(admin, skus);
+  const settings = await getSourceSettings(db, "TRAILBAIT", DEFAULT_SETTINGS);
 
-  return { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain: session.shop, shopifyMatches };
+  return { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain: session.shop, shopifyMatches, settings };
 };
 
 export const action = async ({ request }) => {
@@ -76,26 +79,19 @@ export const action = async ({ request }) => {
   const intent = formData.get("intent");
 
   if (intent === "fetch") {
+    const settings = await getSourceSettings(db, "TRAILBAIT", DEFAULT_SETTINGS);
     const run = await db.importRun.create({ data: { source: "TRAILBAIT", status: "running" } });
     try {
       const products = await fetchAllProducts(TRAILBAIT_DOMAIN);
-      await db.$transaction(
-        products.map((p) =>
-          db.stagedProduct.create({
-            data: {
-              runId: run.id,
-              source: "TRAILBAIT",
-              ...mapShopifyProduct(p, TRAILBAIT_DOMAIN, undefined, trailbaitPricing, TRAILBAIT_BRAND),
-              status: "NEEDS_REVIEW",
-            },
-          }),
-        ),
+      const mapped = products.map((p) =>
+        mapShopifyProduct(p, TRAILBAIT_DOMAIN, undefined, (price) => trailbaitPricing(price, settings), TRAILBAIT_BRAND),
       );
+      const { created, updated } = await upsertStagedProducts(db, run.id, "TRAILBAIT", mapped);
       await db.importRun.update({
         where: { id: run.id },
         data: { status: "done", totalFound: products.length, totalDone: products.length, finishedAt: new Date() },
       });
-      return { ok: true, mode: "fetch", count: products.length };
+      return { ok: true, mode: "fetch", created, updated };
     } catch (err) {
       console.error("TrailBait import failed:", err);
       await db.importRun.update({
@@ -118,6 +114,19 @@ export const action = async ({ request }) => {
       },
     });
     return { ok: true, mode: "updatePrice" };
+  }
+
+  if (intent === "updateSettings") {
+    const sourceMultiplier = parseFloat(formData.get("sourceMultiplier"));
+    const costRatio = parseFloat(formData.get("costRatio"));
+    if (Number.isNaN(sourceMultiplier) || sourceMultiplier <= 0) {
+      return { ok: false, mode: "updateSettings", error: "Multiplier must be a positive number." };
+    }
+    if (Number.isNaN(costRatio) || costRatio <= 0 || costRatio > 1) {
+      return { ok: false, mode: "updateSettings", error: "Cost ratio must be a number between 0 and 1 (e.g. 0.6 for 60%)." };
+    }
+    await saveSourceSettings(db, "TRAILBAIT", { sourceMultiplier, costRatio });
+    return { ok: true, mode: "updateSettings" };
   }
 
   if (intent === "push") {
@@ -173,8 +182,66 @@ function PriceCell({ id, label, value, field, saveFetcher }) {
   );
 }
 
+function PricingFormulaCard({ settings }) {
+  const settingsFetcher = useFetcher();
+  const saving = settingsFetcher.state !== "idle";
+  const result = settingsFetcher.data;
+  const [sourceMultiplier, setSourceMultiplier] = useState(String(settings.sourceMultiplier));
+  const [costRatio, setCostRatio] = useState(String(settings.costRatio));
+
+  return (
+    <Card>
+      <BlockStack gap="300">
+        <Text as="h2" variant="headingMd">Pricing formula</Text>
+        <Text as="p" tone="subdued">
+          Retail (ZAR) = AUD price × multiplier, rounded up to the nearest
+          R99. Cost (ZAR) = Retail × cost ratio. Applies to the next fetch
+          — products already staged keep their current price until you
+          edit them individually or re-fetch (which won't touch an
+          already edited price).
+        </Text>
+        {result?.mode === "updateSettings" && result.ok === false && (
+          <Banner tone="critical">{result.error}</Banner>
+        )}
+        {result?.mode === "updateSettings" && result.ok === true && (
+          <Banner tone="success">Saved.</Banner>
+        )}
+        <settingsFetcher.Form method="post">
+          <input type="hidden" name="intent" value="updateSettings" />
+          <InlineStack gap="200" blockAlign="end">
+            <div style={{ maxWidth: 200 }}>
+              <TextField
+                label="AUD → ZAR multiplier"
+                type="number"
+                step="0.1"
+                name="sourceMultiplier"
+                value={sourceMultiplier}
+                onChange={setSourceMultiplier}
+                autoComplete="off"
+              />
+            </div>
+            <div style={{ maxWidth: 200 }}>
+              <TextField
+                label="Cost as ratio of retail"
+                helpText="e.g. 0.6 = 60%"
+                type="number"
+                step="0.01"
+                name="costRatio"
+                value={costRatio}
+                onChange={setCostRatio}
+                autoComplete="off"
+              />
+            </div>
+            <Button submit loading={saving} variant="primary">Save</Button>
+          </InlineStack>
+        </settingsFetcher.Form>
+      </BlockStack>
+    </Card>
+  );
+}
+
 export default function TrailBaitSource() {
-  const { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain, shopifyMatches } = useLoaderData();
+  const { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain, shopifyMatches, settings } = useLoaderData();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetchFetcher = useFetcher();
   const pushFetcher = useFetcher();
@@ -226,20 +293,23 @@ export default function TrailBaitSource() {
       <BlockStack gap="400">
         <Banner tone="info">
           Pulls the live TrailBait catalog from trailbait.com.au/products.json
-          (their storefront also runs on Shopify, so no scraping needed),
-          formats titles as "TRAILBAIT Title Cased Rest", and prices at AUD
-          retail x24, rounded up to the nearest R99 — same formula as STEDI,
-          since there's no distributor cost sheet. Edit Retail/Cost inline
-          below before pushing. Pushed products bring their description and
-          images across automatically and land as Drafts, so nothing goes
-          live without review.
+          (their storefront also runs on Shopify, so no scraping needed)
+          and formats titles as "TRAILBAIT Title Cased Rest". Re-fetching
+          updates existing staged products (title/images/description/tags)
+          instead of duplicating them — it won't touch prices you've
+          already edited or revert anything already pushed. Pushed
+          products bring their description and images across
+          automatically and land as Drafts, so nothing goes live without
+          review.
         </Banner>
 
         {fetchResult?.mode === "fetch" && fetchResult.ok === false && (
           <Banner tone="critical" title="Fetch failed">{fetchResult.error}</Banner>
         )}
         {fetchResult?.mode === "fetch" && fetchResult.ok === true && (
-          <Banner tone="success" title="Fetch complete">{`Staged ${fetchResult.count} products.`}</Banner>
+          <Banner tone="success" title="Fetch complete">
+            {`${fetchResult.created} new, ${fetchResult.updated} updated.`}
+          </Banner>
         )}
         {pushResult?.mode === "push" && (
           <Banner tone={pushResult.ok ? "success" : "warning"} title="Push finished">
@@ -268,6 +338,8 @@ export default function TrailBaitSource() {
             </Text>
           </BlockStack>
         </Card>
+
+        <PricingFormulaCard settings={settings} />
 
         <Card padding="0">
           <Tabs
