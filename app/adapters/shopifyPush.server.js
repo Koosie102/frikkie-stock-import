@@ -73,15 +73,23 @@ export async function pushStagedProduct(admin, staged) {
       })),
     }));
   } else {
-    // No real options — single default variant, no optionValues needed.
+    // No real options — Shopify still requires optionValues on every
+    // variant (confirmed via schema: it's a non-null list, not optional),
+    // even for a single default variant. Omitting it was the actual bug —
+    // it worked for anything with real options (that branch always set
+    // optionValues) but broke on every plain single-variant product,
+    // which is most of a typical catalog. Use Shopify's own default
+    // option/value convention ("Title" / "Default Title") explicitly.
     // Use the edited product-level retail price if set, since that's what
     // the review table lets you override; fall back to the original
     // per-variant computed price otherwise.
     const v = variants[0] || {};
+    productSet.productOptions = [{ name: "Title", position: 1, values: [{ name: "Default Title" }] }];
     productSet.variants = [
       {
         sku: v.sku || undefined,
         price: staged.retailZar ?? v.retailZar,
+        optionValues: [{ optionName: "Title", name: "Default Title" }],
       },
     ];
   }
