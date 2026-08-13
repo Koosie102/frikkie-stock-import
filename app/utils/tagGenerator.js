@@ -20,49 +20,80 @@ const VEHICLE_BRANDS = new Set([
   "suzuki", "volkswagen", "vw", "jeep", "landrover", "gwm", "ldv",
   "mercedes", "chevrolet", "chevy", "ram", "dodge", "subaru", "hyundai",
   "kia", "bmw", "audi", "volvo", "renault", "peugeot", "citroen",
-  "chrysler", "gmc", "honda",
+  "chrysler", "gmc", "honda", "byd",
 ]);
 
+// Canonical (hyphen-free) model names — a word is checked against this
+// set with its own hyphens stripped first (see stripHyphens), so "d-max",
+// "dmax", and "d max" (already one token or not depending on the title)
+// all resolve the same way instead of silently missing real titles that
+// happen to punctuate a model name differently than this list does.
 const VEHICLE_MODELS = new Set([
   "hilux", "ranger", "amarok", "navara", "dmax", "triton", "colorado",
   "landcruiser", "cruiser", "prado", "patrol", "wrangler", "defender",
   "bt50", "pajero", "everest", "raptor", "gladiator", "tacoma", "tundra",
   "silverado", "f150", "jimny", "fortuner", "rodeo", "hiace", "sahara",
   "rubicon", "discovery", "pathfinder", "terrain", "xterra", "frontier",
-  "canyon", "sierra", "titan", "ranger-raptor", "landcruiser-79",
+  "canyon", "sierra", "titan", "mux", "shark",
 ]);
 
-// Filler/marketing words — dropped entirely, never become tags.
+// Filler/marketing words — dropped entirely, never become tags, UNLESS
+// they're consumed as part of a COMPOUND_PHRASES match first (e.g. "next"
+// and "gen" are filler on their own, but "next gen" together is a real
+// generation qualifier and becomes the "next-gen" tag instead).
 const STOPWORDS = new Set([
   "next", "gen", "generation", "series", "kit", "set", "pack", "style",
   "edition", "pair", "single", "new", "the", "a", "an", "for", "with",
   "and", "or", "to", "of", "in", "on", "genuine", "replacement",
   "upgrade", "suit", "suits", "fits", "fitting", "type", "model",
-  "your", "our", "premium", "quality", "heavy", "duty", "inc",
-  "includes", "included", "compatible",
+  "your", "our", "premium", "quality", "heavy", "duty", "super", "all",
+  "inc", "includes", "included", "compatible",
 ]);
 
 // Multi-word phrases collapsed into one hyphenated tag — checked before
 // per-word splitting so they don't also produce separate single-word
-// tags. Order in the output follows title position for these.
+// tags. Includes both physical-part phrases (behind-grill, bull-bar) and
+// generation/trim qualifiers (next-gen, super-duty, 3rd-gen) — the
+// latter matter because that's literally how TrailBait tells otherwise
+// identically-named vehicle collections apart (Next Gen Ranger vs Ranger
+// Super Duty vs an older Ranger).
+//
+// Multiple entries can share the same `tag` to cover spelling variants
+// a source isn't consistent about — e.g. TrailBait's own site uses both
+// "grill" and "grille" depending on the page.
 const COMPOUND_PHRASES = [
-  ["behind", "grill"],
-  ["bull", "bar"],
-  ["roof", "rack"],
-  ["number", "plate"],
-  ["rear", "bar"],
-  ["side", "step"],
-  ["rock", "slider"],
-  ["snatch", "strap"],
-  ["recovery", "point"],
-  ["tow", "point"],
-  ["light", "bar"],
+  { words: ["behind", "grill"], tag: "behind-grill" },
+  { words: ["behind", "grille"], tag: "behind-grill" },
+  { words: ["bull", "bar"], tag: "bull-bar" },
+  { words: ["roof", "rack"], tag: "roof-rack" },
+  { words: ["number", "plate"], tag: "number-plate" },
+  { words: ["rear", "bar"], tag: "rear-bar" },
+  { words: ["side", "step"], tag: "side-step" },
+  { words: ["rock", "slider"], tag: "rock-slider" },
+  { words: ["snatch", "strap"], tag: "snatch-strap" },
+  { words: ["recovery", "point"], tag: "recovery-point" },
+  { words: ["tow", "point"], tag: "tow-point" },
+  { words: ["light", "bar"], tag: "light-bar" },
+  { words: ["next", "gen"], tag: "next-gen" },
+  { words: ["super", "duty"], tag: "super-duty" },
+  { words: ["all", "new"], tag: "all-new" },
+  { words: ["3rd", "gen"], tag: "3rd-gen" },
+  { words: ["2nd", "gen"], tag: "2nd-gen" },
 ];
 
 // Chassis/generation codes vary per model and aren't practical to
 // enumerate (N70, N80, N90, PX2, GU7, NP300...) — matched as a pattern
 // instead: 1-3 letters, 1-3 digits, optional trailing letter.
 const CHASSIS_CODE = /^[a-z]{1,3}\d{1,3}[a-z]?$/;
+
+function stripHyphens(word) {
+  return word.replace(/-/g, "");
+}
+
+function isVehicleWord(word) {
+  const key = stripHyphens(word);
+  return VEHICLE_BRANDS.has(key) || VEHICLE_MODELS.has(key);
+}
 
 function singularize(word) {
   if (word.endsWith("ies") && word.length > 4) return `${word.slice(0, -3)}y`;
@@ -103,27 +134,69 @@ export function generateTags(title, { productType } = {}) {
   const compoundTags = [];
 
   for (const phrase of COMPOUND_PHRASES) {
-    for (let i = 0; i <= words.length - phrase.length; i++) {
+    const hyphenatedForm = phrase.words.join("-");
+    for (let i = 0; i < words.length; i++) {
       if (consumed[i]) continue;
-      if (phrase.every((w, j) => words[i + j] === w)) {
-        compoundTags.push(phrase.join("-"));
-        phrase.forEach((_, j) => { consumed[i + j] = true; });
+      // Title already has it as one hyphenated token ("Behind-Grille") —
+      // common in real titles, and word-pair matching alone would miss
+      // it since there's no word boundary between "behind" and "grille".
+      if (words[i] === hyphenatedForm) {
+        compoundTags.push(phrase.tag);
+        consumed[i] = true;
+        continue;
+      }
+      if (i > words.length - phrase.words.length) continue;
+      if (phrase.words.every((w, j) => words[i + j] === w)) {
+        compoundTags.push(phrase.tag);
+        phrase.words.forEach((_, j) => { consumed[i + j] = true; });
       }
     }
   }
 
   words.forEach((word, i) => {
-    if (consumed[i] || STOPWORDS.has(word) || word.length <= 2 || /^\d+$/.test(word)) return;
-    if (VEHICLE_BRANDS.has(word)) { brandTags.push(word); return; }
-    if (VEHICLE_MODELS.has(word)) { modelTags.push(word); return; }
+    if (consumed[i] || STOPWORDS.has(word)) return;
+
+    const key = stripHyphens(word);
+
+    // Brand/model membership is checked first, regardless of length —
+    // short brand codes like "vw" (2 chars) were previously being caught
+    // by the short-token noise filter below (meant for things like the
+    // "MV"/"MR" trim codes) before ever reaching this check, silently
+    // dropping the vendor's own brand tag.
+    if (VEHICLE_BRANDS.has(key)) { brandTags.push(key); return; }
+    if (VEHICLE_MODELS.has(key)) { modelTags.push(key); return; }
+
+    const isNumber = /^\d+$/.test(word);
+    const adjacentToVehicleWord =
+      (i > 0 && isVehicleWord(words[i - 1])) ||
+      (i < words.length - 1 && isVehicleWord(words[i + 1]));
+
+    // Bare numbers: a 3+ digit number reads as a year/series designator
+    // (2026, 300, 250, 1500) and is kept as a code either way. A shorter
+    // number (like the "6" in "Shark 6") is only meaningful sitting next
+    // to a known brand/model word — on its own it's more likely a pack
+    // count or similar noise, so it's dropped.
+    if (isNumber) {
+      if (word.length >= 3 || adjacentToVehicleWord) codeTags.push(word);
+      return;
+    }
+
+    // Short 1-2 letter tokens (MV, MR, GU...) are noise UNLESS they sit
+    // right next to a recognized brand/model word, in which case they're
+    // almost always a trim/generation code (MV Triton, MR Triton).
+    if (word.length <= 2) {
+      if (adjacentToVehicleWord) codeTags.push(word);
+      return;
+    }
+
     if (CHASSIS_CODE.test(word)) { codeTags.push(word); return; }
     otherTags.push(singularize(word));
   });
 
-  // Order: brand, model, chassis code, item type, descriptors — matches
-  // how these tags are actually used for filtering/collections, and
-  // keeps output consistent across products regardless of how the title
-  // happened to be worded.
+  // Order: brand, model, chassis/generation code, item type, descriptors
+  // — matches how these tags are actually used for filtering/collections,
+  // and keeps output consistent across products regardless of how the
+  // title happened to be worded.
   brandTags.forEach(add);
   modelTags.forEach(add);
   codeTags.forEach(add);
