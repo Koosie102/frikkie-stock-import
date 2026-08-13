@@ -35,6 +35,28 @@ const PUBLICATIONS_QUERY = `#graphql
   }
 `;
 
+// Defensive cleanup applied to every tag before it reaches Shopify,
+// regardless of where it came from — the source's own raw tags,
+// stale staged rows from before the current tag generator existed,
+// or anything else that could slip through with an empty string, a
+// too-long value, or a near-duplicate. Shopify's tag validation
+// ("Product tags is invalid") gives no detail on which tag or why,
+// so cleaning up defensively is cheaper than trying to diagnose it
+// after the fact every time it happens.
+function sanitizeTags(tags) {
+  const seen = new Set();
+  const cleaned = [];
+  for (const raw of tags || []) {
+    if (typeof raw !== "string") continue;
+    const trimmed = raw.trim().slice(0, 255); // Shopify's own per-tag limit
+    const key = trimmed.toLowerCase();
+    if (!trimmed || seen.has(key)) continue;
+    seen.add(key);
+    cleaned.push(trimmed);
+  }
+  return cleaned;
+}
+
 // Maps a Source enum value to the vendor name that should land on the
 // Shopify product. Was hardcoded to "ALTIQ" previously, which silently
 // mislabeled every other source's pushed products — caught while adding
@@ -85,7 +107,7 @@ export async function pushStagedProduct(admin, staged, existingProductId, channe
     descriptionHtml: staged.descriptionHtml || "",
     vendor: VENDOR_NAMES[staged.source] || staged.source,
     status: "DRAFT",
-    tags: staged.tags || [],
+    tags: sanitizeTags(staged.tags),
   };
 
   if (staged.images?.length) {
