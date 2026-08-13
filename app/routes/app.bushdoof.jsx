@@ -173,14 +173,20 @@ export const action = async ({ request }) => {
 
   if (intent === "push") {
     const ids = formData.getAll("ids");
+    const stagedList = await db.stagedProduct.findMany({ where: { id: { in: ids } } });
+    // Batch-match all selected SKUs once, so a product already in the
+    // store (pushed via this app before, or listed some other way) gets
+    // updated in place instead of creating a duplicate.
+    const skus = stagedList.map((s) => s.sku).filter(Boolean);
+    const matches = await matchSkusToShopify(admin, skus);
+
     let pushed = 0;
     const errors = [];
-    for (const id of ids) {
-      const staged = await db.stagedProduct.findUnique({ where: { id } });
-      if (!staged) continue;
+    for (const staged of stagedList) {
+      const existingProductId = staged.shopifyProductId || matches[staged.sku]?.productId;
       try {
-        const shopifyProductId = await pushStagedProduct(admin, staged);
-        await db.stagedProduct.update({ where: { id }, data: { status: "PUSHED", shopifyProductId } });
+        const shopifyProductId = await pushStagedProduct(admin, staged, existingProductId);
+        await db.stagedProduct.update({ where: { id: staged.id }, data: { status: "PUSHED", shopifyProductId } });
         pushed += 1;
       } catch (err) {
         console.error(`Bushdoof push failed for ${staged.title}:`, err);

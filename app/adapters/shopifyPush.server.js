@@ -3,8 +3,8 @@
 // Lands as DRAFT so nothing goes live until reviewed in the store admin.
 
 const PRODUCT_SET_MUTATION = `#graphql
-  mutation CreateStagedProduct($productSet: ProductSetInput!, $synchronous: Boolean!) {
-    productSet(synchronous: $synchronous, input: $productSet) {
+  mutation CreateStagedProduct($productSet: ProductSetInput!, $synchronous: Boolean!, $identifier: ProductSetIdentifiers) {
+    productSet(synchronous: $synchronous, input: $productSet, identifier: $identifier) {
       product { id }
       userErrors { field message }
     }
@@ -23,7 +23,7 @@ export const VENDOR_NAMES = {
   TRAILBAIT: "TrailBait",
 };
 
-export async function pushStagedProduct(admin, staged) {
+export async function pushStagedProduct(admin, staged, existingProductId) {
   const { optionNames = [], variants = [] } = staged.variantsJson || {};
 
   const productSet = {
@@ -95,7 +95,19 @@ export async function pushStagedProduct(admin, staged) {
   }
 
   const response = await admin.graphql(PRODUCT_SET_MUTATION, {
-    variables: { productSet, synchronous: true },
+    variables: {
+      productSet,
+      synchronous: true,
+      // When the staged product is already pushed (has its own
+      // shopifyProductId) or matches an existing product by SKU,
+      // pass that id so productSet updates it in place instead of
+      // creating a duplicate. Omitted entirely (not just null) when
+      // there's nothing to match — Shopify treats an explicit null
+      // the same as "create new", but passing the variable at all
+      // when undefined can trip strict validation, so build it
+      // conditionally.
+      ...(existingProductId ? { identifier: { id: existingProductId } } : {}),
+    },
   });
   const body = await response.json();
   const result = body.data?.productSet;
