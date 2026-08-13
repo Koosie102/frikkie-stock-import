@@ -39,13 +39,8 @@ const PUBLICATIONS_QUERY = `#graphql
 // Shopify product. Was hardcoded to "ALTIQ" previously, which silently
 // mislabeled every other source's pushed products — caught while adding
 // TrailBait as a 5th source.
-export const VENDOR_NAMES = {
-  STEDI: "STEDI",
-  BUSHDOOF: "Bushdoof",
-  ULTRA_VISION: "Ultra Vision",
-  ALTIQ: "ALTIQ",
-  TRAILBAIT: "TrailBait",
-};
+import { VENDOR_NAMES } from "../utils/vendorNames";
+export { VENDOR_NAMES };
 
 // Fetches the store's primary/first active location and every sales
 // channel (publication) once per push batch — called by the route before

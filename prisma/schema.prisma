@@ -102,3 +102,22 @@ model SourceSettings {
   settingsJson  Json
   updatedAt     DateTime @updatedAt
 }
+
+// A smart-collection definition managed by the Collections tab: title,
+// which menu group it nests under (e.g. "Shop by vehicle"), and the rule
+// list that becomes a Shopify smart collection's ruleSet. shopifyCollectionId
+// is null until first pushed; pushing again after that updates in place
+// instead of creating a duplicate.
+model CollectionDef {
+  id                  String   @id @default(cuid())
+  source              Source
+  title               String
+  menuGroup           String?  // null = this collection is itself a top-level menu item (no level-3 nesting)
+  position            Int      @default(0)
+  rules               Json     // [{ column: "VENDOR"|"TAG", relation: "EQUALS"|"NOT_EQUALS"|..., condition: string }]
+  shopifyCollectionId String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([source])
+}
