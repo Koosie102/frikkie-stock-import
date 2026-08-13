@@ -79,6 +79,8 @@ const COMPOUND_PHRASES = [
   { words: ["all", "new"], tag: "all-new" },
   { words: ["3rd", "gen"], tag: "3rd-gen" },
   { words: ["2nd", "gen"], tag: "2nd-gen" },
+  { words: ["first", "aid"], tag: "first-aid" },
+  { words: ["fire", "extinguisher"], tag: "fire-extinguisher" },
 ];
 
 // Chassis/generation codes vary per model and aren't practical to
@@ -110,6 +112,20 @@ function tokenize(text) {
     .split(/\s+/)
     .filter(Boolean);
 }
+
+// Shopify smart collections apply one AND/OR mode to the WHOLE rule set —
+// there's no way to express "vendor equals X AND (tag equals A OR tag
+// equals B OR tag equals C)" in a single collection. So for categories
+// that are naturally an OR of several item-type words (Electrical could
+// be a fuse, an isolator, a harness...), a single consolidated category
+// tag gets added whenever any trigger word is present, and the smart
+// collection rule becomes a plain two-rule AND: vendor + this one tag.
+const CATEGORY_TAG_RULES = [
+  { category: "electrical", triggers: ["fuse", "isolator", "harness", "wiring", "switch"] },
+  { category: "communication", triggers: ["uhf", "aerial", "radio"] },
+  { category: "storage", triggers: ["maxtrax", "rack", "tub", "roof-rack"] },
+  { category: "safety", triggers: ["first-aid", "fire-extinguisher", "recovery"] },
+];
 
 // productType: optional category/product-type string from the source
 // (e.g. Shopify's product_type field) — used as the primary item-type
@@ -210,6 +226,10 @@ export function generateTags(title, { productType } = {}) {
   }
 
   compoundTags.forEach(add);
+
+  for (const rule of CATEGORY_TAG_RULES) {
+    if (rule.triggers.some((t) => seen.has(t))) add(rule.category);
+  }
 
   return tags;
 }
