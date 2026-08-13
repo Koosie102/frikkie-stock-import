@@ -1,4 +1,5 @@
 import { formatProductTitle } from "../utils/text";
+import { generateTags } from "../utils/tagGenerator";
 
 // Maps a scraped STEDI product (from stediScraper.server.js) into the same
 // StagedProduct shape mapShopifyProduct() produces for the Shopify-source
@@ -45,7 +46,12 @@ export function mapStediProduct(scraped, titlePrefix, pricingFn) {
     descriptionHtml: scraped.descriptionHtml || "",
     images: scraped.images,
     variantsJson: { optionNames: isGrouped ? ["Option"] : [], variants },
-    tags: [], // no category->tag mapping ported yet — see ShopifyTagsCard for the existing-tag reference instead
+    // No category/product_type signal captured from the STEDI scraper yet
+    // (Magento category pages aren't threaded through to here) — title-only
+    // generation, so item-type tags may be less reliable here than for the
+    // Shopify-sourced brands where product_type is available. See
+    // tagGenerator.js for why that gap exists.
+    tags: generateTags(scraped.title),
     retailZar: first?.retailZar ?? null,
     costZar: first?.costZar ?? null,
     priceIsEstimated: true,

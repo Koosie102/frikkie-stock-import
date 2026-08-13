@@ -20,7 +20,7 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { getAllProductUrlsWithCategories, parseProduct } from "../adapters/stediScraper.server";
 import { mapStediProduct } from "../adapters/stediMap.server";
-import { pushStagedProduct } from "../adapters/shopifyPush.server";
+import { pushStagedProduct, getPushChannelInfo } from "../adapters/shopifyPush.server";
 import { matchSkusToShopify, syncVariantPrice, fetchVendorProducts, fuzzyMatchTitles, checkProductsExist } from "../adapters/shopifyMatch.server";
 import { summarizeVendorTags } from "../adapters/shopifyTaxonomy.server";
 import { VENDOR_NAMES } from "../adapters/shopifyPush.server";
@@ -232,13 +232,14 @@ export const action = async ({ request }) => {
     // updated in place instead of creating a duplicate.
     const skus = stagedList.map((s) => s.sku).filter(Boolean);
     const matches = await matchSkusToShopify(admin, skus);
+    const channelInfo = await getPushChannelInfo(admin);
 
     let pushed = 0;
     const errors = [];
     for (const staged of stagedList) {
       const existingProductId = staged.shopifyProductId || matches[staged.sku]?.productId;
       try {
-        const shopifyProductId = await pushStagedProduct(admin, staged, existingProductId);
+        const shopifyProductId = await pushStagedProduct(admin, staged, existingProductId, channelInfo);
         await db.stagedProduct.update({ where: { id: staged.id }, data: { status: "PUSHED", shopifyProductId } });
         pushed += 1;
       } catch (err) {

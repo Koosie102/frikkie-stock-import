@@ -11,6 +11,30 @@ const PRODUCT_SET_MUTATION = `#graphql
   }
 `;
 
+const PUBLISH_MUTATION = `#graphql
+  mutation PublishToAllChannels($id: ID!, $input: [PublicationInput!]!) {
+    publishablePublish(id: $id, input: $input) {
+      userErrors { field message }
+    }
+  }
+`;
+
+const PRIMARY_LOCATION_QUERY = `#graphql
+  query PrimaryLocation {
+    locations(first: 1, query: "status:active") {
+      nodes { id }
+    }
+  }
+`;
+
+const PUBLICATIONS_QUERY = `#graphql
+  query AllPublications {
+    publications(first: 25) {
+      nodes { id }
+    }
+  }
+`;
+
 // Maps a Source enum value to the vendor name that should land on the
 // Shopify product. Was hardcoded to "ALTIQ" previously, which silently
 // mislabeled every other source's pushed products — caught while adding
@@ -23,8 +47,43 @@ export const VENDOR_NAMES = {
   TRAILBAIT: "TrailBait",
 };
 
-export async function pushStagedProduct(admin, staged, existingProductId) {
+// Fetches the store's primary/first active location and every sales
+// channel (publication) once per push batch — called by the route before
+// looping over selected products, rather than per-product, since neither
+// changes between pushes in the same batch.
+export async function getPushChannelInfo(admin) {
+  const [locResponse, pubResponse] = await Promise.all([
+    admin.graphql(PRIMARY_LOCATION_QUERY),
+    admin.graphql(PUBLICATIONS_QUERY),
+  ]);
+  const locBody = await locResponse.json();
+  const pubBody = await pubResponse.json();
+
+  const locationId = locBody.data?.locations?.nodes?.[0]?.id || null;
+  const publicationIds = (pubBody.data?.publications?.nodes || []).map((p) => p.id);
+
+  return { locationId, publicationIds };
+}
+
+export async function pushStagedProduct(admin, staged, existingProductId, channelInfo = {}) {
+  const { locationId, publicationIds = [] } = channelInfo;
   const { optionNames = [], variants = [] } = staged.variantsJson || {};
+
+  // Shared per-variant fields for cost/inventory tracking — every variant
+  // gets these regardless of whether the product has real options.
+  // Reported missing: cost-per-item wasn't set at all (Shopify left it
+  // blank), and inventory wasn't tracked (so it showed neither a stock
+  // count nor "continue selling when out of stock").
+  const inventoryFieldsFor = (v) => ({
+    inventoryItem: {
+      cost: v.costZar != null ? v.costZar.toFixed(2) : undefined,
+      tracked: true,
+    },
+    inventoryPolicy: "CONTINUE",
+    inventoryQuantities: locationId
+      ? [{ locationId, name: "available", quantity: 0 }]
+      : undefined,
+  });
 
   const productSet = {
     title: staged.title,
@@ -71,14 +130,12 @@ export async function pushStagedProduct(admin, staged, existingProductId) {
         optionName: name,
         name: v[`option${idx + 1}`],
       })),
+      ...inventoryFieldsFor(v),
     }));
   } else {
     // No real options — Shopify still requires optionValues on every
     // variant (confirmed via schema: it's a non-null list, not optional),
-    // even for a single default variant. Omitting it was the actual bug —
-    // it worked for anything with real options (that branch always set
-    // optionValues) but broke on every plain single-variant product,
-    // which is most of a typical catalog. Use Shopify's own default
+    // even for a single default variant. Use Shopify's own default
     // option/value convention ("Title" / "Default Title") explicitly.
     // Use the edited product-level retail price if set, since that's what
     // the review table lets you override; fall back to the original
@@ -90,6 +147,7 @@ export async function pushStagedProduct(admin, staged, existingProductId) {
         sku: v.sku || undefined,
         price: staged.retailZar ?? v.retailZar,
         optionValues: [{ optionName: "Title", name: "Default Title" }],
+        ...inventoryFieldsFor({ costZar: staged.costZar ?? v.costZar }),
       },
     ];
   }
@@ -119,5 +177,29 @@ export async function pushStagedProduct(admin, staged, existingProductId) {
     throw new Error(result.userErrors.map((e) => e.message).join("; "));
   }
 
-  return result.product.id;
+  const productId = result.product.id;
+
+  // Publish to every sales channel — reported that channels weren't being
+  // enabled at all (product created but not available anywhere). DRAFT
+  // status already keeps it off storefronts regardless of publication, so
+  // this is safe to do unconditionally; it just means every channel is
+  // ready the moment the product is switched to Active.
+  if (publicationIds.length > 0) {
+    try {
+      const pubResponse = await admin.graphql(PUBLISH_MUTATION, {
+        variables: { id: productId, input: publicationIds.map((id) => ({ publicationId: id })) },
+      });
+      const pubBody = await pubResponse.json();
+      const pubErrors = pubBody.data?.publishablePublish?.userErrors;
+      if (pubErrors?.length) {
+        console.error(`Publish-to-channels warning for ${productId}:`, pubErrors);
+      }
+    } catch (err) {
+      // Non-fatal — the product itself pushed fine; a channel-publish
+      // failure shouldn't be reported as the whole push failing.
+      console.error(`Publish-to-channels failed for ${productId}:`, err);
+    }
+  }
+
+  return productId;
 }

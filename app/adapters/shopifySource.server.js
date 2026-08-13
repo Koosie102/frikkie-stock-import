@@ -8,6 +8,7 @@
 // since that's password-protected and not scriptable.
 
 import { formatProductTitle } from "../utils/text";
+import { generateTags } from "../utils/tagGenerator";
 
 const PAGE_SIZE = 250;
 
@@ -96,16 +97,14 @@ export function mapShopifyProduct(product, sourceDomain, retailMultiplier = 24.5
     descriptionHtml: product.body_html,
     images,
     variantsJson: { optionNames, variants },
-    tags: normalizeTags(product.tags),
+    // Reported the source's raw tags were too scattered/inconsistent to
+    // use as-is — generate a simpler set instead (brand/model/chassis
+    // code/item-type), using the source's own product_type field (e.g.
+    // "Brackets") as the item-type signal when present, which is far more
+    // reliable than guessing from title words alone.
+    tags: generateTags(product.title, { productType: product.product_type }),
     retailZar: firstPricing.retailZar ?? null,
     costZar: firstPricing.costZar ?? null,
     priceIsEstimated: firstPricing.priceIsEstimated ?? false,
   };
-}
-
-function normalizeTags(tags) {
-  if (Array.isArray(tags)) {
-    return tags.map((t) => String(t).trim()).filter(Boolean);
-  }
-  return (tags || "").split(",").map((t) => t.trim()).filter(Boolean);
 }
