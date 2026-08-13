@@ -19,7 +19,7 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { fetchAllProducts, mapShopifyProduct } from "../adapters/shopifySource.server";
 import { pushStagedProduct } from "../adapters/shopifyPush.server";
-import { matchSkusToShopify, syncVariantPrice, fetchVendorProducts, fuzzyMatchTitles } from "../adapters/shopifyMatch.server";
+import { matchSkusToShopify, syncVariantPrice, fetchVendorProducts, fuzzyMatchTitles, checkProductsExist } from "../adapters/shopifyMatch.server";
 import { summarizeVendorTags } from "../adapters/shopifyTaxonomy.server";
 import { VENDOR_NAMES } from "../adapters/shopifyPush.server";
 import { productIdToAdminPath } from "../utils/shopify";
@@ -159,6 +159,22 @@ export const action = async ({ request }) => {
     } catch (err) {
       return { ok: false, mode: "syncPrice", id, error: String(err.message || err) };
     }
+  }
+
+  if (intent === "syncWithShopify") {
+    const pushedItems = await db.stagedProduct.findMany({
+      where: { source: "ALTIQ", status: "PUSHED", shopifyProductId: { not: null } },
+      select: { id: true, shopifyProductId: true },
+    });
+    const existingIds = await checkProductsExist(admin, pushedItems.map((p) => p.shopifyProductId));
+    const missing = pushedItems.filter((p) => !existingIds.has(p.shopifyProductId));
+    if (missing.length > 0) {
+      await db.stagedProduct.updateMany({
+        where: { id: { in: missing.map((p) => p.id) } },
+        data: { status: "NEEDS_REVIEW", shopifyProductId: null },
+      });
+    }
+    return { ok: true, mode: "syncWithShopify", checked: pushedItems.length, reset: missing.length };
   }
 
   if (intent === "push") {
@@ -333,10 +349,13 @@ export default function AltiqSource() {
   const fetchFetcher = useFetcher();
   const pushFetcher = useFetcher();
   const priceFetcher = useFetcher();
+  const syncFetcher = useFetcher();
   const fetching = fetchFetcher.state !== "idle";
   const pushing = pushFetcher.state !== "idle";
+  const syncing = syncFetcher.state !== "idle";
   const fetchResult = fetchFetcher.data;
   const pushResult = pushFetcher.data;
+  const syncResult = syncFetcher.data;
 
   const [searchInput, setSearchInput] = useState(q);
   useEffect(() => setSearchInput(q), [q]);
@@ -411,11 +430,23 @@ export default function AltiqSource() {
           </Banner>
         )}
 
+        {syncResult?.mode === "syncWithShopify" && (
+          <Banner tone="success" title="Synced with Shopify">
+            {syncResult.reset > 0
+              ? `Checked ${syncResult.checked} pushed product(s) — ${syncResult.reset} no longer exist in Shopify and were reset to Needs Review.`
+              : `Checked ${syncResult.checked} pushed product(s) — all still exist in Shopify.`}
+          </Banner>
+        )}
+
         <Card>
           <BlockStack gap="300">
             <InlineStack align="space-between">
               <Text as="h2" variant="headingMd">Fetch catalog</Text>
               <InlineStack gap="200">
+                <syncFetcher.Form method="post">
+                  <input type="hidden" name="intent" value="syncWithShopify" />
+                  <Button submit loading={syncing}>Sync with Shopify</Button>
+                </syncFetcher.Form>
                 <Button url={`/app/export/ALTIQ?tab=${tabId}${q ? `&q=${encodeURIComponent(q)}` : ""}`} external>
                   Export CSV
                 </Button>

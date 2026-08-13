@@ -50,6 +50,47 @@ export async function matchSkusToShopify(admin, skus) {
   return matches;
 }
 
+// Batch-checks whether a set of Shopify product IDs still exist — used by
+// the "Sync with Shopify" action to catch products that were deleted (or
+// otherwise vanished) directly in Shopify admin after being pushed, so
+// the staged row's "Pushed" status doesn't silently go stale. Shopify's
+// nodes() query returns null in the matching position for any id that
+// no longer exists or isn't a Product, which is exactly what's needed
+// here — no separate per-id existence check required.
+const NODES_EXIST_QUERY = `#graphql
+  query CheckProductsExist($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      id
+    }
+  }
+`;
+
+const NODES_CHUNK_SIZE = 100;
+
+export async function checkProductsExist(admin, productIds) {
+  const existing = new Set();
+  const ids = [...new Set(productIds.filter(Boolean))];
+
+  for (let i = 0; i < ids.length; i += NODES_CHUNK_SIZE) {
+    const chunk = ids.slice(i, i + NODES_CHUNK_SIZE);
+    try {
+      const response = await admin.graphql(NODES_EXIST_QUERY, { variables: { ids: chunk } });
+      const body = await response.json();
+      for (const node of body.data?.nodes || []) {
+        if (node?.id) existing.add(node.id);
+      }
+    } catch (err) {
+      console.error("Shopify product existence check failed for chunk:", err);
+      // Non-fatal — on a failed chunk, leave those ids untouched (not
+      // marked missing) rather than risk resetting a product that's
+      // actually still there because of a transient error.
+      for (const id of chunk) existing.add(id);
+    }
+  }
+
+  return existing;
+}
+
 // Updates a single variant's price on an existing Shopify product — used
 // by the "Sync price" action when a staged product's price has drifted
 // from what's live on the matched Shopify listing (e.g. after a pricing
