@@ -61,17 +61,50 @@ const SORT_FIELDS = ["title", "sku", null, null, "costZar", "retailZar", null, n
 // short-lived serverless function — the crawl keeps running against the
 // same process after the HTTP response is sent. Progress is written to
 // the ImportRun row as it goes; the UI polls the loader to show it.
+//
+// Reported: with only a coarse "discovering categories" / percent-done
+// state and no visibility into the ~54-category discovery phase (which
+// alone can take several minutes before any product count even appears),
+// this looked like it had hung. Now keeps a running statusMessage plus a
+// rolling log tail (last ~150 lines) so there's always something visible
+// happening, matching the "Logs" tab the original standalone STEDI app had.
 async function runStediScrapeInBackground(runId) {
+  const logLines = [];
+  const log = (line) => {
+    const stamp = new Date().toISOString().slice(11, 19);
+    logLines.push(`[${stamp}] ${line}`);
+    if (logLines.length > 150) logLines.shift();
+  };
+  const flush = async (extra = {}) => {
+    await db.importRun
+      .update({ where: { id: runId }, data: { logTail: logLines.join("\n"), ...extra } })
+      .catch(() => {});
+  };
+
   try {
+    log("Starting STEDI scrape.");
+    await flush({ statusMessage: "Discovering categories…" });
+
     const settings = await getSourceSettings(db, "STEDI", DEFAULT_SETTINGS);
     const pricingFn = (price) => stediPricing(price, settings);
 
-    const { urlToCategories } = await getAllProductUrlsWithCategories(async (_cat, _count, totalSoFar) => {
-      await db.importRun.update({ where: { id: runId }, data: { totalFound: totalSoFar } }).catch(() => {});
+    const { urlToCategories } = await getAllProductUrlsWithCategories(async (progress) => {
+      log(
+        `Category ${progress.index}/${progress.total}: ${progress.category} — ` +
+          `${progress.foundThisCategory} product URL(s) (${progress.totalUrlsSoFar} total so far)`,
+      );
+      await flush({
+        statusMessage: `Discovering categories: ${progress.index}/${progress.total} (${progress.totalUrlsSoFar} product URLs found so far)`,
+        totalFound: progress.totalUrlsSoFar,
+      });
     });
 
     const productUrls = [...urlToCategories.keys()];
-    await db.importRun.update({ where: { id: runId }, data: { totalFound: productUrls.length } });
+    log(`Category discovery done — ${productUrls.length} product URLs to process.`);
+    await flush({
+      totalFound: productUrls.length,
+      statusMessage: `Processing products: 0/${productUrls.length}`,
+    });
 
     let done = 0;
     for (const url of productUrls) {
@@ -80,26 +113,35 @@ async function runStediScrapeInBackground(runId) {
         if (scraped.isRealProduct) {
           const mapped = mapStediProduct(scraped, STEDI_BRAND, pricingFn);
           await upsertStagedProducts(db, runId, "STEDI", [mapped]);
+          log(`[${done + 1}/${productUrls.length}] Staged: ${scraped.title}`);
+        } else {
+          log(`[${done + 1}/${productUrls.length}] Skipped (not a real product page): ${url}`);
         }
       } catch (err) {
-        console.error(`STEDI: failed to parse/stage ${url}:`, err.message || err);
+        log(`[${done + 1}/${productUrls.length}] FAILED: ${url} — ${err.message || err}`);
       }
       done += 1;
       if (done % 5 === 0 || done === productUrls.length) {
-        await db.importRun.update({ where: { id: runId }, data: { totalDone: done } }).catch(() => {});
+        await flush({ totalDone: done, statusMessage: `Processing products: ${done}/${productUrls.length}` });
       }
     }
 
-    await db.importRun.update({
-      where: { id: runId },
-      data: { status: "done", totalDone: done, finishedAt: new Date() },
+    log("Scrape complete.");
+    await flush({
+      status: "done",
+      totalDone: done,
+      statusMessage: `Done — ${done} product(s) processed.`,
+      finishedAt: new Date(),
     });
   } catch (err) {
+    log(`Scrape failed: ${err.message || err}`);
     console.error("STEDI background scrape failed:", err);
-    await db.importRun.update({
-      where: { id: runId },
-      data: { status: "failed", errorLog: String(err.message || err), finishedAt: new Date() },
-    }).catch(() => {});
+    await flush({
+      status: "failed",
+      statusMessage: "Failed — see error below.",
+      errorLog: String(err.message || err),
+      finishedAt: new Date(),
+    });
   }
 }
 
@@ -428,17 +470,42 @@ function ScrapeProgressCard({ run }) {
         {running && (
           <BlockStack gap="200">
             <Text as="p" tone="subdued">
-              {run.totalFound > 0
-                ? `Processed ${run.totalDone} of ${run.totalFound} products. This runs in the background — feel free to leave this tab and come back; a full catalog scrape takes roughly 10-15 minutes at STEDI's rate limit.`
-                : "Discovering categories and product URLs…"}
+              {run.statusMessage || "Starting…"}
+              {" — this runs in the background, feel free to leave this tab and come back."}
             </Text>
             {run.totalFound > 0 && (
               <ProgressBar progress={Math.round((run.totalDone / run.totalFound) * 100)} size="small" />
             )}
           </BlockStack>
         )}
+        {run.status === "done" && run.statusMessage && (
+          <Text as="p" tone="subdued">{run.statusMessage}</Text>
+        )}
         {run.status === "failed" && (
           <Banner tone="critical">{run.errorLog || "Unknown error."}</Banner>
+        )}
+        {run.logTail && (
+          <details>
+            <summary style={{ cursor: "pointer", color: "var(--p-color-text-link, #2c6ecb)" }}>
+              View log
+            </summary>
+            <div
+              style={{
+                marginTop: 8,
+                maxHeight: 320,
+                overflowY: "auto",
+                background: "#1a1a1a",
+                color: "#e0e0e0",
+                padding: 12,
+                borderRadius: 6,
+                fontFamily: "monospace",
+                fontSize: 12,
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {run.logTail}
+            </div>
+          </details>
         )}
       </BlockStack>
     </Card>

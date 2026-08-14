@@ -186,13 +186,22 @@ export async function getAllProductUrlsWithCategories(onCategoryDone) {
   const categoryUrlsAbsolute = new Set(categories.map((c) => absoluteUrl(c)));
 
   const urlToCategories = new Map();
-  for (const cat of categories) {
+  for (let i = 0; i < categories.length; i++) {
+    const cat = categories[i];
     const urls = await getProductUrlsFromCategory(cat);
     for (const url of urls) {
       if (!urlToCategories.has(url)) urlToCategories.set(url, []);
       urlToCategories.get(url).push(cat);
     }
-    if (onCategoryDone) onCategoryDone(cat, urls.size, urlToCategories.size);
+    if (onCategoryDone) {
+      onCategoryDone({
+        category: cat,
+        index: i + 1,
+        total: categories.length,
+        foundThisCategory: urls.size,
+        totalUrlsSoFar: urlToCategories.size,
+      });
+    }
   }
 
   // Some category pages link out to other category/series pages using the

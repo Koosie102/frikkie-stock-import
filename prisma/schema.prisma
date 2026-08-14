@@ -52,15 +52,17 @@ enum ImportStatus {
 // STEDI Import Manager) is queryable from a single table instead of one
 // SQLite file per tool.
 model ImportRun {
-  id          String   @id @default(cuid())
-  source      Source
-  status      String   @default("running") // running | done | failed
-  totalFound  Int      @default(0)
-  totalDone   Int      @default(0)
-  startedAt   DateTime @default(now())
-  finishedAt  DateTime?
-  errorLog    String?  @db.Text
-  items       StagedProduct[]
+  id            String   @id @default(cuid())
+  source        Source
+  status        String   @default("running") // running | done | failed
+  totalFound    Int      @default(0)
+  totalDone     Int      @default(0)
+  statusMessage String?  // current one-line status, e.g. "Discovering categories: 12/54"
+  logTail       String?  @db.Text // rolling tail of recent log lines, newline-joined
+  startedAt     DateTime @default(now())
+  finishedAt    DateTime?
+  errorLog      String?  @db.Text
+  items         StagedProduct[]
 }
 
 // A scraped/fetched product before (or after) it's pushed to Shopify.
