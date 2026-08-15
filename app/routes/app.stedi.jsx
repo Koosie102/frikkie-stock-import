@@ -18,7 +18,7 @@ import {
 } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { getAllProductUrlsWithCategories, parseProduct } from "../adapters/stediScraper.server";
+import { getAllProductUrlsWithCategories, parseProduct, resetCookieJar } from "../adapters/stediScraper.server";
 import { mapStediProduct } from "../adapters/stediMap.server";
 import { pushStagedProduct, getPushChannelInfo } from "../adapters/shopifyPush.server";
 import { matchSkusToShopify, syncVariantPrice, fetchVendorProducts, fuzzyMatchTitles, checkProductsExist } from "../adapters/shopifyMatch.server";
@@ -83,6 +83,7 @@ async function runStediScrapeInBackground(runId) {
 
   try {
     log("Starting STEDI scrape.");
+    resetCookieJar();
     await flush({ statusMessage: "Discovering categories…" });
 
     const settings = await getSourceSettings(db, "STEDI", DEFAULT_SETTINGS);

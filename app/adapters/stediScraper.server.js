@@ -84,6 +84,37 @@ const SEED_CATEGORY_URLS = [
   "/wiring-electrical/wiring-accessories.html",
 ];
 
+// The original Python scraper used requests.Session(), which
+// transparently persists cookies (Cloudflare clearance, Magento session,
+// etc.) across every request in the run. This Node port had been making
+// each fetch() independently with no cookie jar at all — the homepage
+// request would succeed and set cookies, but every subsequent request
+// silently dropped them, which is almost certainly why every category
+// page came back with zero product tiles (200 OK, but not the real
+// page) despite the homepage nav parsing correctly. Mirrors
+// requests.Session() by capturing Set-Cookie on every response and
+// replaying the accumulated jar on every subsequent request.
+let cookieJar = new Map();
+
+function resetCookieJar() {
+  cookieJar = new Map();
+}
+
+function cookieHeader() {
+  return [...cookieJar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+}
+
+function updateCookieJar(response) {
+  const setCookieHeaders = response.headers.getSetCookie?.() || [];
+  for (const cookieStr of setCookieHeaders) {
+    const pair = cookieStr.split(";")[0];
+    const idx = pair.indexOf("=");
+    if (idx > -1) cookieJar.set(pair.slice(0, idx).trim(), pair.slice(idx + 1).trim());
+  }
+}
+
+export { resetCookieJar };
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -97,9 +128,24 @@ async function fetchHtml(pathOrUrl, retried = false) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(url, { headers: HEADERS, signal: controller.signal });
+    const headers = { ...HEADERS };
+    const cookies = cookieHeader();
+    if (cookies) headers.Cookie = cookies;
+
+    const res = await fetch(url, { headers, signal: controller.signal });
+    updateCookieJar(res);
     if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
     const html = await res.text();
+
+    // If cookie persistence somehow isn't enough (Cloudflare policy
+    // change, etc.), fail loudly instead of quietly returning "0
+    // products found" for a page that was actually a challenge/
+    // interstitial — that's what made the original bug (missing cookie
+    // jar) so confusing to diagnose from the logs alone.
+    if (html.length < 5000 && /enable javascript|checking your browser|cf-browser-verification|just a moment/i.test(html)) {
+      throw new Error(`Blocked/challenge page returned instead of real content for ${url}`);
+    }
+
     await sleep(REQUEST_DELAY_MS);
     return { html, url };
   } catch (err) {
