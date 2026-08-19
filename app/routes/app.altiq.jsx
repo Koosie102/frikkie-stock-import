@@ -37,10 +37,18 @@ const ALTIQ_LOGO = "https://altiq.com.au/cdn/shop/files/Altiq_Wordmark_Icon_Reve
 
 // Editable via the Pricing formula card below — persisted in
 // SourceSettings, these are just the fallback if nothing's been saved yet.
-const DEFAULT_SETTINGS = { retailMultiplier: 24.5 };
+// Same round-up-to-R99 shape as TrailBait/Bushdoof/STEDI: retail = AUD
+// price x multiplier, rounded up to the nearest R99; cost = retail x
+// costRatio. ALTIQ previously used a flat round-to-cent formula with no
+// cost value at all — inconsistent with the other three sources, and
+// meant ALTIQ products were pushing to Shopify with no cost-per-item.
+const DEFAULT_SETTINGS = { retailMultiplier: 24.5, costRatio: 0.6 };
 
 function altiqPricing(priceForeign, settings) {
-  return { retailZar: Math.round(priceForeign * settings.retailMultiplier * 100) / 100 };
+  const raw = priceForeign * settings.retailMultiplier;
+  const retailZar = Math.ceil((raw + 1) / 100) * 100 - 1;
+  const costZar = Math.round(retailZar * settings.costRatio * 100) / 100;
+  return { retailZar, costZar, priceIsEstimated: true };
 }
 
 const TABS = [
@@ -134,11 +142,17 @@ export const action = async ({ request }) => {
 
   if (intent === "updateSettings") {
     const retailMultiplier = parseFloat(formData.get("retailMultiplier"));
+    const costRatio = parseFloat(formData.get("costRatio"));
     if (Number.isNaN(retailMultiplier) || retailMultiplier <= 0) {
       return { ok: false, mode: "updateSettings", error: "Retail multiplier must be a positive number." };
     }
-    await saveSourceSettings(db, "ALTIQ", { retailMultiplier });
-    const updated = await recalculateStagedPrices(db, "ALTIQ", (price) => altiqPricing(price, { retailMultiplier }));
+    if (Number.isNaN(costRatio) || costRatio <= 0 || costRatio > 1) {
+      return { ok: false, mode: "updateSettings", error: "Cost ratio must be a number between 0 and 1 (e.g. 0.6 for 60%)." };
+    }
+    await saveSourceSettings(db, "ALTIQ", { retailMultiplier, costRatio });
+    const updated = await recalculateStagedPrices(db, "ALTIQ", (price) =>
+      altiqPricing(price, { retailMultiplier, costRatio }),
+    );
     return { ok: true, mode: "updateSettings", updated };
   }
 
@@ -284,13 +298,15 @@ function PricingFormulaCard({ settings }) {
   const saving = settingsFetcher.state !== "idle";
   const result = settingsFetcher.data;
   const [retailMultiplier, setRetailMultiplier] = useState(String(settings.retailMultiplier));
+  const [costRatio, setCostRatio] = useState(String(settings.costRatio));
 
   return (
     <Card>
       <BlockStack gap="300">
         <Text as="h2" variant="headingMd">Pricing formula</Text>
         <Text as="p" tone="subdued">
-          Retail (ZAR) = AUD price × multiplier. Saving recalculates every
+          Retail (ZAR) = AUD price × multiplier, rounded up to the nearest
+          R99. Cost (ZAR) = Retail × cost ratio. Saving recalculates every
           un-pushed staged product's price with the new formula —
           products already pushed to Shopify are left untouched.
         </Text>
@@ -311,6 +327,18 @@ function PricingFormulaCard({ settings }) {
                 name="retailMultiplier"
                 value={retailMultiplier}
                 onChange={setRetailMultiplier}
+                autoComplete="off"
+              />
+            </div>
+            <div style={{ maxWidth: 200 }}>
+              <TextField
+                label="Cost as ratio of retail"
+                helpText="e.g. 0.6 = 60%"
+                type="number"
+                step="0.01"
+                name="costRatio"
+                value={costRatio}
+                onChange={setCostRatio}
                 autoComplete="off"
               />
             </div>
