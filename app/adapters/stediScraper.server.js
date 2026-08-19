@@ -7,17 +7,7 @@
 // they were kept there.
 import * as cheerio from "cheerio";
 
-const BASE_URL = "https://www.stedi.com.au"; // confirmed: real AU storefront, Cloudflare-protected
-const REQUEST_DELAY_MS = 600; // be polite, avoid getting rate-limited/blocked
-const TIMEOUT_MS = 20000;
-
-const HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-  // Cloudflare on stedi.com.au rejects requests without a fuller browser-like
-  // header set (a bare User-Agent alone got a 403) — keep all of these.
-};
+const BASE_URL = "https://www.stedi.com.au"; // confirmed: real AU storefront
 
 // Top-level/category-ish landing pages, taken from the live AU nav
 // (discovered by walking every .html link off the homepage in the
@@ -84,36 +74,20 @@ const SEED_CATEGORY_URLS = [
   "/wiring-electrical/wiring-accessories.html",
 ];
 
-// The original Python scraper used requests.Session(), which
-// transparently persists cookies (Cloudflare clearance, Magento session,
-// etc.) across every request in the run. This Node port had been making
-// each fetch() independently with no cookie jar at all — the homepage
-// request would succeed and set cookies, but every subsequent request
-// silently dropped them, which is almost certainly why every category
-// page came back with zero product tiles (200 OK, but not the real
-// page) despite the homepage nav parsing correctly. Mirrors
-// requests.Session() by capturing Set-Cookie on every response and
-// replaying the accumulated jar on every subsequent request.
-let cookieJar = new Map();
+const REQUEST_DELAY_MS = 600; // be polite even through the unlocker
+const TIMEOUT_MS = 30000; // Web Unlocker requests are slower than a direct fetch — it's doing real anti-bot handling server-side
 
-function resetCookieJar() {
-  cookieJar = new Map();
-}
-
-function cookieHeader() {
-  return [...cookieJar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
-}
-
-function updateCookieJar(response) {
-  const setCookieHeaders = response.headers.getSetCookie?.() || [];
-  for (const cookieStr of setCookieHeaders) {
-    const pair = cookieStr.split(";")[0];
-    const idx = pair.indexOf("=");
-    if (idx > -1) cookieJar.set(pair.slice(0, idx).trim(), pair.slice(idx + 1).trim());
-  }
-}
-
-export { resetCookieJar };
+// Direct requests to stedi.com.au — including from this app's Railway
+// deployment, and separately confirmed from a completely different cloud
+// network too — get a 404 on nearly every category page despite the pages
+// being genuinely live (confirmed by fetching the same URLs successfully
+// from a residential connection). That's consistent with anti-bot
+// detection at the IP/network level, not anything fixable by headers or
+// cookies (both were tried first and didn't help). Requests now route
+// through Bright Data's Web Unlocker API instead, which handles this
+// server-side. Requires BRIGHTDATA_API_KEY and BRIGHTDATA_UNLOCKER_ZONE
+// to be set (Railway env vars, never committed to the repo).
+const BRIGHTDATA_API_URL = "https://api.brightdata.com/request";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -125,23 +99,41 @@ function absoluteUrl(pathOrUrl) {
 
 async function fetchHtml(pathOrUrl, retried = false) {
   const url = absoluteUrl(pathOrUrl);
+  const apiKey = process.env.BRIGHTDATA_API_KEY;
+  const zone = process.env.BRIGHTDATA_UNLOCKER_ZONE;
+  if (!apiKey || !zone) {
+    // Fail loudly and immediately rather than silently falling back to a
+    // direct fetch that's already confirmed not to work — that's exactly
+    // the failure mode ("0 products found", no clear error) that made
+    // the earlier bug so hard to diagnose.
+    throw new Error(
+      "BRIGHTDATA_API_KEY / BRIGHTDATA_UNLOCKER_ZONE are not set — STEDI scraping requires routing through Bright Data's Web Unlocker, since direct requests to stedi.com.au are blocked.",
+    );
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const headers = { ...HEADERS };
-    const cookies = cookieHeader();
-    if (cookies) headers.Cookie = cookies;
+    const res = await fetch(BRIGHTDATA_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ zone, url, format: "raw" }),
+      signal: controller.signal,
+    });
 
-    const res = await fetch(url, { headers, signal: controller.signal });
-    updateCookieJar(res);
-    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`Bright Data Web Unlocker HTTP ${res.status} for ${url}${detail ? `: ${detail.slice(0, 300)}` : ""}`);
+    }
     const html = await res.text();
 
-    // If cookie persistence somehow isn't enough (Cloudflare policy
-    // change, etc.), fail loudly instead of quietly returning "0
-    // products found" for a page that was actually a challenge/
-    // interstitial — that's what made the original bug (missing cookie
-    // jar) so confusing to diagnose from the logs alone.
+    // Belt-and-suspenders: fail loudly if the unlocker itself ever hands
+    // back a challenge/interstitial instead of real content, rather than
+    // silently treating it as "0 products found" the way the original
+    // bug did.
     if (html.length < 5000 && /enable javascript|checking your browser|cf-browser-verification|just a moment/i.test(html)) {
       throw new Error(`Blocked/challenge page returned instead of real content for ${url}`);
     }
