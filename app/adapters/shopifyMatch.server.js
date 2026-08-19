@@ -134,7 +134,7 @@ const VENDOR_PRODUCTS_QUERY = `#graphql
         status
         tags
         variants(first: 1) {
-          nodes { price }
+          nodes { price sku }
         }
       }
       pageInfo { hasNextPage endCursor }
@@ -181,6 +181,7 @@ export async function fetchVendorProducts(admin, vendor) {
         title: n.title,
         status: n.status,
         tags: n.tags,
+        sku: n.variants.nodes[0]?.sku || null,
         price: n.variants.nodes[0]?.price ? parseFloat(n.variants.nodes[0].price) : null,
       })),
     );
@@ -208,6 +209,7 @@ export function fuzzyMatchTitles(unmatchedTitles, vendorProducts) {
         productTitle: best.title,
         status: best.status,
         price: best.price,
+        sku: best.sku,
         score: best.score,
       };
     }

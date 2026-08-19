@@ -89,6 +89,7 @@ model StagedProduct {
   status           ImportStatus @default(NEW)
   shopifyProductId String?
   matchedShopifyId String?
+  matchDeclined    Boolean      @default(false) // user dismissed a fuzzy-match suggestion — don't resurface it
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
 

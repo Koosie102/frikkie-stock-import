@@ -74,7 +74,7 @@ export const loader = async ({ request }) => {
   const shopifyMatches = await matchSkusToShopify(admin, skus);
   const settings = await getSourceSettings(db, "TRAILBAIT", DEFAULT_SETTINGS);
 
-  const unmatched = staged.filter((p) => !p.sku || !shopifyMatches[p.sku]);
+  const unmatched = staged.filter((p) => (!p.sku || !shopifyMatches[p.sku]) && !p.matchDeclined);
   let fuzzyMatches = {};
   let vendorTags = [];
   if (unmatched.length > 0) {
@@ -116,6 +116,24 @@ export const action = async ({ request }) => {
       });
       return { ok: false, mode: "fetch", error: String(err) };
     }
+  }
+
+  if (intent === "acceptMatch") {
+    const id = formData.get("id");
+    const productId = formData.get("productId");
+    const matchedSku = formData.get("sku") || null;
+    if (matchedSku) {
+      await db.stagedProduct.update({ where: { id }, data: { sku: matchedSku } });
+    } else {
+      await db.stagedProduct.update({ where: { id }, data: { shopifyProductId: productId, status: "PUSHED" } });
+    }
+    return { ok: true, mode: "acceptMatch", id };
+  }
+
+  if (intent === "declineMatch") {
+    const id = formData.get("id");
+    await db.stagedProduct.update({ where: { id }, data: { matchDeclined: true } });
+    return { ok: true, mode: "declineMatch", id };
   }
 
   if (intent === "updatePrice") {
@@ -256,6 +274,10 @@ function ShopifyMatchCell({ staged, match, fuzzyMatch, shopDomain }) {
   const syncFetcher = useFetcher();
   const syncing = syncFetcher.state !== "idle";
   const syncResult = syncFetcher.data;
+  const acceptFetcher = useFetcher();
+  const declineFetcher = useFetcher();
+  const accepting = acceptFetcher.state !== "idle";
+  const declining = declineFetcher.state !== "idle";
 
   if (match) {
     const priceDiffers = staged.retailZar != null && Math.round(match.price) !== Math.round(staged.retailZar);
@@ -287,6 +309,20 @@ function ShopifyMatchCell({ staged, match, fuzzyMatch, shopDomain }) {
         <Link url={`https://${shopDomain}${productIdToAdminPath(fuzzyMatch.productId)}`} target="_blank">
           {fuzzyMatch.productTitle}
         </Link>
+        <InlineStack gap="100">
+          <acceptFetcher.Form method="post">
+            <input type="hidden" name="intent" value="acceptMatch" />
+            <input type="hidden" name="id" value={staged.id} />
+            <input type="hidden" name="productId" value={fuzzyMatch.productId} />
+            <input type="hidden" name="sku" value={fuzzyMatch.sku || ""} />
+            <Button submit size="micro" loading={accepting}>Accept</Button>
+          </acceptFetcher.Form>
+          <declineFetcher.Form method="post">
+            <input type="hidden" name="intent" value="declineMatch" />
+            <input type="hidden" name="id" value={staged.id} />
+            <Button submit size="micro" loading={declining}>Decline</Button>
+          </declineFetcher.Form>
+        </InlineStack>
       </BlockStack>
     );
   }
