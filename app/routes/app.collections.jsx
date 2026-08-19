@@ -19,7 +19,7 @@ import db from "../db.server";
 import { fetchVendorProducts } from "../adapters/shopifyMatch.server";
 import { summarizeVendorTags } from "../adapters/shopifyTaxonomy.server";
 import { VENDOR_NAMES } from "../utils/vendorNames";
-import { pushCollectionDef, syncBrandMenu } from "../adapters/shopifyCollections.server";
+import { pushCollectionDef, syncBrandMenu, fetchExistingCollectionsForVendor } from "../adapters/shopifyCollections.server";
 
 const SOURCES = ["STEDI", "BUSHDOOF", "ULTRA_VISION", "ALTIQ", "TRAILBAIT"];
 
@@ -68,6 +68,44 @@ export const action = async ({ request }) => {
   const formData = await request.formData();
   const intent = formData.get("intent");
   const source = formData.get("source");
+
+  if (intent === "syncFromShopify") {
+    try {
+      const found = await fetchExistingCollectionsForVendor(admin, VENDOR_NAMES[source]);
+      let created = 0;
+      let updated = 0;
+      for (const sc of found) {
+        const existing = await db.collectionDef.findFirst({ where: { source, shopifyCollectionId: sc.id } });
+        if (existing) {
+          // Title/rules refresh from Shopify's live state, but menuGroup
+          // and position are left untouched — those are organisational
+          // choices made in this app, not something Shopify has an
+          // opinion on, so a re-sync shouldn't wipe them out.
+          await db.collectionDef.update({
+            where: { id: existing.id },
+            data: { title: sc.title, rules: sc.rules },
+          });
+          updated += 1;
+        } else {
+          const maxPos = await db.collectionDef.aggregate({ where: { source }, _max: { position: true } });
+          await db.collectionDef.create({
+            data: {
+              source,
+              title: sc.title,
+              menuGroup: null, // unknown from Shopify's side — group it manually afterward if it belongs under one
+              position: (maxPos._max.position ?? -1) + 1,
+              rules: sc.rules,
+              shopifyCollectionId: sc.id,
+            },
+          });
+          created += 1;
+        }
+      }
+      return { ok: true, mode: "syncFromShopify", found: found.length, created, updated };
+    } catch (err) {
+      return { ok: false, mode: "syncFromShopify", error: String(err.message || err) };
+    }
+  }
 
   if (intent === "addDef") {
     const maxPos = await db.collectionDef.aggregate({ where: { source }, _max: { position: true } });
@@ -247,6 +285,7 @@ export default function CollectionsTab() {
   const deleteFetcher = useFetcher();
   const pushAllFetcher = useFetcher();
   const menuFetcher = useFetcher();
+  const syncFromShopifyFetcher = useFetcher();
 
   const [brandTabTitle, setBrandTabTitle] = useState(VENDOR_NAMES[source].toUpperCase());
   useEffect(() => setBrandTabTitle(VENDOR_NAMES[source].toUpperCase()), [source]);
@@ -254,6 +293,7 @@ export default function CollectionsTab() {
   const selectedTabIndex = SOURCES.indexOf(source);
   const pushAllResult = pushAllFetcher.data;
   const menuResult = menuFetcher.data;
+  const syncFromShopifyResult = syncFromShopifyFetcher.data;
   const pushedCount = collectionDefs.filter((d) => d.shopifyCollectionId).length;
 
   return (
@@ -263,11 +303,16 @@ export default function CollectionsTab() {
           Manage smart-collection definitions per brand — title, which menu
           group they nest under, and the tag rules that become a Shopify
           smart collection. Push creates the collection the first time and
-          updates it in place after that. Shopify collections only support
-          "vendor AND tag AND tag..." in one rule set — there's no way to
-          do "OR" across tags here, which is why some collections (like
-          flat categories) rely on a single consolidated tag rather than
-          several alternatives.
+          updates it in place after that. "Sync existing from Shopify"
+          pulls in any smart collections for this brand that already exist
+          in your store (from before this app, or created manually) so
+          they show up here too — matched by vendor rule, and safe to
+          re-run: already-tracked collections just get their title/tags
+          refreshed, any menu group you've set here is left alone. Shopify
+          collections only support "vendor AND tag AND tag..." in one rule
+          set — there's no way to do "OR" across tags here, which is why
+          some collections (like flat categories) rely on a single
+          consolidated tag rather than several alternatives.
         </Banner>
 
         <Card padding="0">
@@ -293,11 +338,27 @@ export default function CollectionsTab() {
           </Banner>
         )}
 
+        {syncFromShopifyResult?.mode === "syncFromShopify" && syncFromShopifyResult.ok === false && (
+          <Banner tone="critical" title="Couldn't sync from Shopify">{syncFromShopifyResult.error}</Banner>
+        )}
+        {syncFromShopifyResult?.mode === "syncFromShopify" && syncFromShopifyResult.ok === true && (
+          <Banner tone="success" title="Synced from Shopify">
+            {`Found ${syncFromShopifyResult.found} existing smart collection(s) for ${VENDOR_NAMES[source]} — ${syncFromShopifyResult.created} added, ${syncFromShopifyResult.updated} already tracked and refreshed.`}
+          </Banner>
+        )}
+
         <Card>
           <BlockStack gap="300">
             <InlineStack align="space-between">
               <Text as="h2" variant="headingMd">{`${VENDOR_NAMES[source]} collections`}</Text>
               <InlineStack gap="200">
+                <syncFromShopifyFetcher.Form method="post">
+                  <input type="hidden" name="intent" value="syncFromShopify" />
+                  <input type="hidden" name="source" value={source} />
+                  <Button submit loading={syncFromShopifyFetcher.state !== "idle"}>
+                    Sync existing from Shopify
+                  </Button>
+                </syncFromShopifyFetcher.Form>
                 <addFetcher.Form method="post">
                   <input type="hidden" name="intent" value="addDef" />
                   <input type="hidden" name="source" value={source} />

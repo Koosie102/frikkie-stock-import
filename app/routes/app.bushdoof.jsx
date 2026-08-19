@@ -19,6 +19,7 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { fetchAllProducts, mapShopifyProduct } from "../adapters/shopifySource.server";
 import { pushStagedProduct, getPushChannelInfo } from "../adapters/shopifyPush.server";
+import { bulkSyncPrices } from "../adapters/bulkPriceSync.server";
 import { matchSkusToShopify, syncVariantPrice, fetchVendorProducts, fuzzyMatchTitles, checkProductsExist } from "../adapters/shopifyMatch.server";
 import { summarizeVendorTags } from "../adapters/shopifyTaxonomy.server";
 import { VENDOR_NAMES } from "../adapters/shopifyPush.server";
@@ -168,6 +169,15 @@ export const action = async ({ request }) => {
       return { ok: true, mode: "syncPrice", id };
     } catch (err) {
       return { ok: false, mode: "syncPrice", id, error: String(err.message || err) };
+    }
+  }
+
+  if (intent === "updateAllPrices") {
+    try {
+      const result = await bulkSyncPrices(admin, db, "BUSHDOOF");
+      return { ok: result.errors.length === 0, mode: "updateAllPrices", ...result };
+    } catch (err) {
+      return { ok: false, mode: "updateAllPrices", checked: 0, updated: 0, errors: [String(err.message || err)] };
     }
   }
 
@@ -375,12 +385,15 @@ export default function BushdoofSource() {
   const pushFetcher = useFetcher();
   const priceFetcher = useFetcher();
   const syncFetcher = useFetcher();
+  const updateAllFetcher = useFetcher();
   const fetching = fetchFetcher.state !== "idle";
   const pushing = pushFetcher.state !== "idle";
   const syncing = syncFetcher.state !== "idle";
+  const updatingAll = updateAllFetcher.state !== "idle";
   const fetchResult = fetchFetcher.data;
   const pushResult = pushFetcher.data;
   const syncResult = syncFetcher.data;
+  const updateAllResult = updateAllFetcher.data;
 
   const [searchInput, setSearchInput] = useState(q);
   useEffect(() => setSearchInput(q), [q]);
@@ -460,6 +473,19 @@ export default function BushdoofSource() {
           </Banner>
         )}
 
+        {updateAllResult?.mode === "updateAllPrices" && (
+          <Banner tone={updateAllResult.ok ? "success" : "warning"} title="Prices updated">
+            <BlockStack gap="100">
+              <Text as="p">
+                {`Checked ${updateAllResult.checked} matched product(s) — ${updateAllResult.updated} price(s) updated on Shopify.`}
+              </Text>
+              {updateAllResult.errors?.map((e, i) => (
+                <Text as="p" tone="critical" key={i}>{e}</Text>
+              ))}
+            </BlockStack>
+          </Banner>
+        )}
+
         <Card>
           <BlockStack gap="300">
             <InlineStack align="space-between">
@@ -469,6 +495,10 @@ export default function BushdoofSource() {
                   <input type="hidden" name="intent" value="syncWithShopify" />
                   <Button submit loading={syncing}>Sync with Shopify</Button>
                 </syncFetcher.Form>
+                <updateAllFetcher.Form method="post">
+                  <input type="hidden" name="intent" value="updateAllPrices" />
+                  <Button submit loading={updatingAll}>Update all prices</Button>
+                </updateAllFetcher.Form>
                 <Button url={`/app/export/BUSHDOOF?tab=${tabId}${q ? `&q=${encodeURIComponent(q)}` : ""}`} external>
                   Export CSV
                 </Button>

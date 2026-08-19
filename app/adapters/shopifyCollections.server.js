@@ -46,6 +46,58 @@ export async function pushCollectionDef(admin, def) {
   return result.collection.id;
 }
 
+// Pulls in smart collections that already exist in Shopify for a given
+// vendor — for brands that had real collections set up directly in
+// Shopify before this app existed (only TrailBait's 31 were seeded here
+// manually; STEDI/Bushdoof/ALTIQ/Ultra Vision's live collections predate
+// this app and were never in the CollectionDef table). Fetches every
+// smart collection in the store (paginated) and keeps only the ones
+// whose rule set includes a VENDOR rule matching this brand — Shopify
+// has no server-side "find collections for vendor X" filter, so this
+// has to fetch broadly and filter client-side.
+const ALL_COLLECTIONS_QUERY = `#graphql
+  query AllCollections($cursor: String) {
+    collections(first: 100, after: $cursor) {
+      nodes {
+        id
+        title
+        ruleSet {
+          rules { column relation condition }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+const COLLECTIONS_MAX_PAGES = 10; // 1000 collections — comfortably above what this store has
+
+export async function fetchExistingCollectionsForVendor(admin, vendor) {
+  const matches = [];
+  let cursor = null;
+  for (let page = 0; page < COLLECTIONS_MAX_PAGES; page++) {
+    const response = await admin.graphql(ALL_COLLECTIONS_QUERY, { variables: { cursor } });
+    const body = await response.json();
+    const data = body.data?.collections;
+    if (!data) break;
+
+    for (const node of data.nodes) {
+      const rules = node.ruleSet?.rules;
+      if (!rules) continue; // manual (non-smart) collection — nothing to sync, no rules to read
+      const hasVendorRule = rules.some(
+        (r) => r.column === "VENDOR" && r.relation === "EQUALS" && r.condition.toLowerCase() === vendor.toLowerCase(),
+      );
+      if (hasVendorRule) {
+        matches.push({ id: node.id, title: node.title, rules });
+      }
+    }
+
+    if (!data.pageInfo.hasNextPage) break;
+    cursor = data.pageInfo.endCursor;
+  }
+  return matches;
+}
+
 // Full 3-level tree, including id/resourceId on every item — needed to
 // round-trip every OTHER top-level tab unchanged when we update the menu,
 // since menuUpdate replaces the entire items list in one call.
