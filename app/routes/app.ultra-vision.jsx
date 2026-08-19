@@ -17,7 +17,7 @@ import {
 } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { fetchAllUltraVisionProducts, fetchProductVariations } from "../adapters/wooCommerce.server";
+import { fetchAllUltraVisionProducts, fetchAllVariations, groupVariationsByParent } from "../adapters/wooCommerce.server";
 import { mapUltraVisionProduct } from "../adapters/ultraVisionMap.server";
 import { pushStagedProduct, getPushChannelInfo } from "../adapters/shopifyPush.server";
 import { matchSkusToShopify, syncVariantPrice, fetchVendorProducts, fuzzyMatchTitles, checkProductsExist } from "../adapters/shopifyMatch.server";
@@ -78,15 +78,22 @@ async function runUltraVisionFetchInBackground(runId) {
 
     const products = await fetchAllUltraVisionProducts();
     log(`Fetched ${products.length} product(s) from WooCommerce.`);
+    await flush({ statusMessage: "Fetching variation data…" });
+
+    const allVariations = await fetchAllVariations();
+    const variationsByParent = groupVariationsByParent(allVariations);
+    log(
+      `Fetched ${allVariations.length} variation(s) total. ` +
+        `${variationsByParent.size} distinct parent product(s) matched by the grouping key — ` +
+        `if this is 0 but some products below have variants, the field-name guess for a variation's ` +
+        `parent reference needs a second look.`,
+    );
     await flush({ totalFound: products.length, statusMessage: `Processing 0/${products.length}` });
 
     let done = 0;
     for (const product of products) {
       try {
-        let variations = [];
-        if (Array.isArray(product.variations) && product.variations.length > 0) {
-          variations = await fetchProductVariations(product.id);
-        }
+        const variations = variationsByParent.get(String(product.id)) || [];
         const mapped = mapUltraVisionProduct(product, variations, UV_BRAND, pricingFn);
         await upsertStagedProducts(db, runId, "ULTRA_VISION", [mapped]);
         log(`[${done + 1}/${products.length}] Staged: ${product.name}${variations.length ? ` (${variations.length} variants)` : ""}`);
