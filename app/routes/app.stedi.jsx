@@ -423,14 +423,18 @@ function PricingFormulaCard({ settings }) {
         <Text as="p" tone="subdued">
           Retail (ZAR) = AUD price × multiplier, rounded up to the nearest
           R99. Cost (ZAR) = Retail × cost ratio. Saving recalculates every
-          un-pushed staged product's price with the new formula — products
-          already pushed to Shopify are left untouched.
+          staged product's price with the new formula, including ones
+          already pushed to Shopify — this only updates the number shown
+          here, it never touches Shopify directly. Already-pushed
+          products will then show a Sync button (or use "Update all
+          prices" for all of them at once) if the new price differs
+          from what's live.
         </Text>
         {result?.mode === "updateSettings" && result.ok === false && (
           <Banner tone="critical">{result.error}</Banner>
         )}
         {result?.mode === "updateSettings" && result.ok === true && (
-          <Banner tone="success">{`Saved. Recalculated ${result.updated} un-pushed product(s).`}</Banner>
+          <Banner tone="success">{`Saved. Recalculated ${result.updated} product(s) — including already-pushed ones, so the price-differs-from-live indicator will show where Shopify needs updating.`}</Banner>
         )}
         <settingsFetcher.Form method="post">
           <input type="hidden" name="intent" value="updateSettings" />
