@@ -30,7 +30,7 @@ import { recalculateStagedPrices } from "../utils/recalcPricing.server";
 import { getSourceSettings, saveSourceSettings } from "../utils/sourceSettings.server";
 
 const MODS300_DOMAIN = "www.300mods.com.au";
-const MODS300_BRAND = "300mods";
+const MODS300_BRAND = "4x4 Factory";
 
 // Editable via the Pricing formula card below — persisted in
 // SourceSettings, these are just the fallback if nothing's been saved yet.
@@ -531,7 +531,7 @@ export default function Mods300Source() {
       <BlockStack gap="400">
         <Banner tone="info">
           Pulls the live 300mods catalog from www.300mods.com.au/products.json
-          and formats titles as "300mods Title Cased Rest". Pushed products
+          and formats titles as "4x4 Factory Title Cased Rest". Pushed products
           use vendor "4x4 Factory Products" (matching your 2 existing
           300mods listings, so they're recognized as the same products
           rather than duplicates) rather than "300mods" itself. Re-fetching
