@@ -10,4 +10,9 @@ export const VENDOR_NAMES = {
   ULTRA_VISION: "Ultra Vision",
   ALTIQ: "ALTIQ",
   TRAILBAIT: "TrailBait",
+  // Deliberately not "300mods" — Coenraad's 2 existing 300mods products
+  // are already listed under this vendor name, and matching it means new
+  // imports recognize them as the same products (SKU/fuzzy match, push
+  // update-in-place) instead of treating them as duplicates.
+  MODS300: "4x4 Factory Products",
 };

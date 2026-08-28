@@ -21,7 +21,7 @@ import { summarizeVendorTags } from "../adapters/shopifyTaxonomy.server";
 import { VENDOR_NAMES } from "../utils/vendorNames";
 import { pushCollectionDef, syncBrandMenu, fetchExistingCollectionsForVendor } from "../adapters/shopifyCollections.server";
 
-const SOURCES = ["STEDI", "BUSHDOOF", "ULTRA_VISION", "ALTIQ", "TRAILBAIT"];
+const SOURCES = ["STEDI", "BUSHDOOF", "ULTRA_VISION", "ALTIQ", "TRAILBAIT", "MODS300"];
 
 // Turns the editable "tags" text field (comma-separated, "!tag" = exclude)
 // into the rules array pushCollectionDef expects, always prefixed with the

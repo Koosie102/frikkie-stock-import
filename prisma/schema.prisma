@@ -36,6 +36,7 @@ enum Source {
   ULTRA_VISION
   ALTIQ
   TRAILBAIT
+  MODS300
 }
 
 enum ImportStatus {
