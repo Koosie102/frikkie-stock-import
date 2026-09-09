@@ -284,10 +284,29 @@ function ShopifyMatchCell({ staged, match, fuzzyMatch, shopDomain }) {
   const accepting = acceptFetcher.state !== "idle";
   const declining = declineFetcher.state !== "idle";
 
+  const [confirmation, setConfirmation] = useState(null); // "accepted" | "declined" | null
+
+  useEffect(() => {
+    if (acceptFetcher.state === "idle" && acceptFetcher.data?.mode === "acceptMatch" && acceptFetcher.data?.id === staged.id) {
+      setConfirmation(acceptFetcher.data.ok ? "accepted" : null);
+    }
+  }, [acceptFetcher.state, acceptFetcher.data, staged.id]);
+
+  useEffect(() => {
+    if (declineFetcher.state === "idle" && declineFetcher.data?.mode === "declineMatch" && declineFetcher.data?.id === staged.id) {
+      setConfirmation(declineFetcher.data.ok ? "declined" : null);
+    }
+  }, [declineFetcher.state, declineFetcher.data, staged.id]);
+
+  const confirmationBadge = confirmation && (
+    <Badge tone="success">{confirmation === "accepted" ? "Match accepted" : "Match declined"}</Badge>
+  );
+
   if (match) {
     const priceDiffers = staged.retailZar != null && Math.round(match.price) !== Math.round(staged.retailZar);
     return (
       <BlockStack gap="100">
+        {confirmationBadge}
         <Link url={`https://${shopDomain}${productIdToAdminPath(match.productId)}`} target="_blank">
           {`${zar(match.price)} (${match.status})`}
         </Link>
@@ -320,19 +339,27 @@ function ShopifyMatchCell({ staged, match, fuzzyMatch, shopDomain }) {
             <input type="hidden" name="id" value={staged.id} />
             <input type="hidden" name="productId" value={fuzzyMatch.productId} />
             <input type="hidden" name="sku" value={fuzzyMatch.sku || ""} />
-            <Button submit size="micro" loading={accepting}>Accept</Button>
+            <Button submit size="micro" loading={accepting} disabled={declining}>Accept</Button>
           </acceptFetcher.Form>
           <declineFetcher.Form method="post">
             <input type="hidden" name="intent" value="declineMatch" />
             <input type="hidden" name="id" value={staged.id} />
-            <Button submit size="micro" loading={declining}>Decline</Button>
+            <Button submit size="micro" loading={declining} disabled={accepting}>Decline</Button>
           </declineFetcher.Form>
         </InlineStack>
+        {acceptFetcher.data?.mode === "acceptMatch" && acceptFetcher.data?.id === staged.id && acceptFetcher.data.ok === false && (
+          <Text as="span" tone="critical">Couldn't accept — try again.</Text>
+        )}
       </BlockStack>
     );
   }
 
-  return <Text as="span" tone="subdued">Not in store</Text>;
+  return (
+    <BlockStack gap="100">
+      {confirmationBadge}
+      <Text as="span" tone="subdued">Not in store</Text>
+    </BlockStack>
+  );
 }
 
 function PricingFormulaCard({ settings }) {

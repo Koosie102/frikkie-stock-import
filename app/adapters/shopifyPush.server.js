@@ -50,7 +50,17 @@ function sanitizeTags(tags) {
     if (typeof raw !== "string") continue;
     const trimmed = raw.trim().slice(0, 255); // Shopify's own per-tag limit
     const key = trimmed.toLowerCase();
-    if (!trimmed || seen.has(key)) continue;
+    // A tag with no real alphanumeric content (bare "-", "&", etc.) slips
+    // through here even though it's rejected by Shopify as invalid. This
+    // was already fixed at the source in tagGenerator.js (title
+    // separators like " - " no longer produce a lone "-" token), but that
+    // only protects freshly-generated tags — staged rows fetched before
+    // that fix still carry the bad tag in the DB until re-fetched, and
+    // this was supposed to be the defensive backstop for exactly that
+    // case. It wasn't actually checking for this, so it let it straight
+    // through to Shopify's own rejection instead of catching it here.
+    const hasAlphanumeric = /[a-z0-9]/i.test(trimmed);
+    if (!trimmed || !hasAlphanumeric || seen.has(key)) continue;
     seen.add(key);
     cleaned.push(trimmed);
   }
