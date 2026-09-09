@@ -660,14 +660,15 @@ export default function Mods300Source() {
                 {`Push ${selectedResources.length || ""} selected to Shopify`}
               </Button>
             </div>
-            <IndexTable
-              resourceName={resourceName}
-              itemCount={staged.length}
-              selectedItemsCount={allResourcesSelected ? "All" : selectedResources.length}
-              onSelectionChange={handleSelectionChange}
-              sortable={[true, true, false, false, true, true, false, false]}
-              sortColumnIndex={sortColumnIndex === -1 ? undefined : sortColumnIndex}
-              sortDirection={sortField ? sortDirection : undefined}
+          </pushFetcher.Form>
+          <IndexTable
+            resourceName={resourceName}
+            itemCount={staged.length}
+            selectedItemsCount={allResourcesSelected ? "All" : selectedResources.length}
+            onSelectionChange={handleSelectionChange}
+            sortable={[true, true, false, false, true, true, false, false]}
+            sortColumnIndex={sortColumnIndex === -1 ? undefined : sortColumnIndex}
+            sortDirection={sortField ? sortDirection : undefined}
               onSort={handleSort}
               headings={[
                 { title: "Title" },
@@ -714,7 +715,6 @@ export default function Mods300Source() {
                 );
               })}
             </IndexTable>
-          </pushFetcher.Form>
         </Card>
       </BlockStack>
     </Page>
