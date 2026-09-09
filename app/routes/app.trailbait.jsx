@@ -14,6 +14,7 @@ import {
   TextField,
   Tabs,
   Link,
+  Modal,
 } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -210,20 +211,22 @@ export const action = async ({ request }) => {
     return { ok: true, mode: "syncWithShopify", checked: pushedItems.length, reset: missing.length };
   }
 
-  if (intent === "push") {
-    const ids = formData.getAll("ids");
-    const stagedList = await db.stagedProduct.findMany({ where: { id: { in: ids } } });
-    // Batch-match all selected SKUs once, so a product already in the
-    // store (pushed via this app before, or listed some other way) gets
-    // updated in place instead of creating a duplicate.
-    const skus = stagedList.map((s) => s.sku).filter(Boolean);
+  // Shared by both push paths below — actually calls pushStagedProduct
+  // for each item. forceNewIds is used for the "use a different SKU"
+  // resolution: even if the (freshly changed) SKU happens to also match
+  // something, that item pushes as a genuinely new product regardless,
+  // since changing the SKU was specifically to avoid whatever it
+  // previously matched — re-matching it here would defeat the point.
+  async function performPush(stagedList, channelInfo, forceNewIds = new Set()) {
+    const skus = stagedList.filter((s) => !forceNewIds.has(s.id)).map((s) => s.sku).filter(Boolean);
     const matches = await matchSkusToShopify(admin, skus);
-    const channelInfo = await getPushChannelInfo(admin);
 
     let pushed = 0;
     const errors = [];
     for (const staged of stagedList) {
-      const existingProductId = staged.shopifyProductId || matches[staged.sku]?.productId;
+      const existingProductId = forceNewIds.has(staged.id)
+        ? null
+        : staged.shopifyProductId || matches[staged.sku]?.productId;
       try {
         const shopifyProductId = await pushStagedProduct(admin, staged, existingProductId, channelInfo);
         await db.stagedProduct.update({ where: { id: staged.id }, data: { status: "PUSHED", shopifyProductId } });
@@ -233,7 +236,74 @@ export const action = async ({ request }) => {
         errors.push(`${staged.title}: ${String(err.message || err)}`);
       }
     }
+    return { pushed, errors };
+  }
+
+  if (intent === "push") {
+    const ids = formData.getAll("ids");
+    const stagedList = await db.stagedProduct.findMany({ where: { id: { in: ids } } });
+    // Batch-match all selected SKUs once, so a product already in the
+    // store (pushed via this app before, or listed some other way) gets
+    // updated in place instead of creating a duplicate.
+    const skus = stagedList.map((s) => s.sku).filter(Boolean);
+    const matches = await matchSkusToShopify(admin, skus);
+
+    // A product this app already tracks (shopifyProductId set, either
+    // from a previous push or an explicit Accept on a fuzzy match) is a
+    // deliberate, known link — not a conflict, pushes straight through.
+    // A product that merely happens to share a SKU with something
+    // already in the store, that this app has never confirmed a link
+    // to, is exactly the situation that caused real, unnoticed
+    // overwrites before the nested-form bug was fixed — this holds the
+    // whole batch and asks for an explicit decision on each one instead
+    // of silently trusting a SKU coincidence.
+    const conflicts = stagedList
+      .filter((s) => !s.shopifyProductId && s.sku && matches[s.sku])
+      .map((s) => ({
+        id: s.id,
+        title: s.title,
+        sku: s.sku,
+        matchedProductId: matches[s.sku].productId,
+        matchedProductTitle: matches[s.sku].productTitle,
+        matchedPrice: matches[s.sku].price,
+      }));
+
+    if (conflicts.length > 0) {
+      return { ok: true, mode: "push", needsResolution: true, conflicts, ids };
+    }
+
+    const channelInfo = await getPushChannelInfo(admin);
+    const { pushed, errors } = await performPush(stagedList, channelInfo);
     return { ok: errors.length === 0, mode: "push", pushed, errors };
+  }
+
+  if (intent === "pushResolved") {
+    const ids = formData.getAll("ids");
+    const rawStagedList = await db.stagedProduct.findMany({ where: { id: { in: ids } } });
+
+    const forceNewIds = new Set();
+    const finalList = [];
+    let skipped = 0;
+    for (let staged of rawStagedList) {
+      const resolution = formData.get(`resolution_${staged.id}`); // "overwrite" | "skip" | "newsku" | null (wasn't a conflict)
+      if (resolution === "skip") {
+        skipped += 1;
+        continue;
+      }
+      if (resolution === "newsku") {
+        const newSku = formData.get(`newsku_${staged.id}`)?.toString().trim();
+        if (newSku) {
+          await db.stagedProduct.update({ where: { id: staged.id }, data: { sku: newSku } });
+          staged = { ...staged, sku: newSku };
+        }
+        forceNewIds.add(staged.id);
+      }
+      finalList.push(staged);
+    }
+
+    const channelInfo = await getPushChannelInfo(admin);
+    const { pushed, errors } = await performPush(finalList, channelInfo, forceNewIds);
+    return { ok: errors.length === 0, mode: "push", pushed, errors, skipped };
   }
 
   return null;
@@ -446,6 +516,116 @@ function ShopifyTagsCard({ vendorTags }) {
   );
 }
 
+// Shown when a push finds one or more selected products whose SKU
+// matches an existing Shopify product this app has never confirmed a
+// link to. Nothing pushes until every conflict has an explicit choice —
+// there's deliberately no default selection, so this can't be clicked
+// through without actually looking at each one.
+function ConflictResolutionModal({ pushResult, onDismiss }) {
+  const resolveFetcher = useFetcher();
+  const [choices, setChoices] = useState({}); // id -> "overwrite" | "skip" | "newsku"
+  const [newSkus, setNewSkus] = useState({}); // id -> string
+  const resolving = resolveFetcher.state !== "idle";
+
+  const conflicts = pushResult?.conflicts || [];
+
+  const allResolved = conflicts.every((c) => {
+    const choice = choices[c.id];
+    if (!choice) return false;
+    if (choice === "newsku" && !newSkus[c.id]?.trim()) return false;
+    return true;
+  });
+
+  function handleConfirm() {
+    const fd = new FormData();
+    fd.set("intent", "pushResolved");
+    for (const id of pushResult.ids) fd.append("ids", id);
+    for (const c of conflicts) {
+      const choice = choices[c.id];
+      fd.set(`resolution_${c.id}`, choice);
+      if (choice === "newsku") fd.set(`newsku_${c.id}`, newSkus[c.id].trim());
+    }
+    resolveFetcher.submit(fd, { method: "post" });
+  }
+
+  // Once the resolved push actually completes, close the modal — the
+  // page's own pushResult banner (driven by a different fetcher) won't
+  // show this outcome, so mirror it here before dismissing.
+  useEffect(() => {
+    if (resolveFetcher.state === "idle" && resolveFetcher.data?.mode === "push") {
+      onDismiss(resolveFetcher.data);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolveFetcher.state, resolveFetcher.data]);
+
+  return (
+    <Modal
+      open
+      onClose={() => onDismiss(null)}
+      title={`${conflicts.length} product(s) already exist in Shopify`}
+      primaryAction={{
+        content: "Confirm and push",
+        onAction: handleConfirm,
+        loading: resolving,
+        disabled: !allResolved || resolving,
+      }}
+      secondaryActions={[{ content: "Cancel", onAction: () => onDismiss(null), disabled: resolving }]}
+    >
+      <Modal.Section>
+        <BlockStack gap="400">
+          <Text as="p">
+            These products' SKUs match a product already in your store
+            that this app has never confirmed a link to — pushing them
+            as-is would update that existing product. Choose what to do
+            with each before continuing; nothing pushes until every item
+            below has a choice.
+          </Text>
+          {conflicts.map((c) => (
+            <Card key={c.id}>
+              <BlockStack gap="200">
+                <Text as="h3" variant="headingSm">{c.title}</Text>
+                <Text as="p" tone="subdued">
+                  {`SKU "${c.sku}" matches: ${c.matchedProductTitle} (${zar(c.matchedPrice)})`}
+                </Text>
+                <InlineStack gap="200">
+                  <Button
+                    pressed={choices[c.id] === "overwrite"}
+                    onClick={() => setChoices((prev) => ({ ...prev, [c.id]: "overwrite" }))}
+                  >
+                    Overwrite existing
+                  </Button>
+                  <Button
+                    pressed={choices[c.id] === "newsku"}
+                    onClick={() => setChoices((prev) => ({ ...prev, [c.id]: "newsku" }))}
+                  >
+                    Use a different SKU
+                  </Button>
+                  <Button
+                    pressed={choices[c.id] === "skip"}
+                    onClick={() => setChoices((prev) => ({ ...prev, [c.id]: "skip" }))}
+                  >
+                    Skip this one
+                  </Button>
+                </InlineStack>
+                {choices[c.id] === "newsku" && (
+                  <TextField
+                    label="New SKU"
+                    labelHidden
+                    placeholder="Enter a SKU that isn't already in use"
+                    value={newSkus[c.id] || ""}
+                    onChange={(val) => setNewSkus((prev) => ({ ...prev, [c.id]: val }))}
+                    autoComplete="off"
+                  />
+                )}
+              </BlockStack>
+            </Card>
+          ))}
+        </BlockStack>
+      </Modal.Section>
+    </Modal>
+  );
+}
+
 export default function TrailBaitSource() {
   const { staged, pushedCount, totalCount, tabId, q, sortField, sortDir, shopDomain, shopifyMatches, fuzzyMatches, vendorTags, settings } = useLoaderData();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -465,6 +645,25 @@ export default function TrailBaitSource() {
 
   const [searchInput, setSearchInput] = useState(q);
   useEffect(() => setSearchInput(q), [q]);
+
+  // The conflict-resolution modal's own push (resolveFetcher, inside the
+  // modal component) is separate from pushFetcher — its result needs to
+  // be surfaced through the same "Push finished" banner once it
+  // completes, and the modal itself needs to be dismissable (Cancel)
+  // without that immediately reopening from the same stale pushFetcher
+  // data on the next render.
+  const [modalDismissed, setModalDismissed] = useState(false);
+  const [resolvedPushResult, setResolvedPushResult] = useState(null);
+  useEffect(() => {
+    if (pushFetcher.state === "submitting") {
+      setModalDismissed(false);
+      setResolvedPushResult(null);
+    }
+  }, [pushFetcher.state]);
+
+  const showConflictModal = pushResult?.needsResolution && !modalDismissed;
+  const finalPushResult =
+    resolvedPushResult || (pushResult?.mode === "push" && !pushResult.needsResolution ? pushResult : null);
 
   const resourceName = { singular: "product", plural: "products" };
   const { selectedResources, allResourcesSelected, handleSelectionChange } = useIndexResourceState(staged);
@@ -523,11 +722,14 @@ export default function TrailBaitSource() {
             {`${fetchResult.created} new, ${fetchResult.updated} updated.`}
           </Banner>
         )}
-        {pushResult?.mode === "push" && (
-          <Banner tone={pushResult.ok ? "success" : "warning"} title="Push finished">
+        {finalPushResult && (
+          <Banner tone={finalPushResult.ok ? "success" : "warning"} title="Push finished">
             <BlockStack gap="100">
-              <Text as="p">{`Pushed ${pushResult.pushed} product(s) to Shopify as drafts.`}</Text>
-              {pushResult.errors?.map((e, i) => (
+              <Text as="p">
+                {`Pushed ${finalPushResult.pushed} product(s) to Shopify as drafts.`}
+                {finalPushResult.skipped > 0 ? ` Skipped ${finalPushResult.skipped} by your choice.` : ""}
+              </Text>
+              {finalPushResult.errors?.map((e, i) => (
                 <Text as="p" tone="critical" key={i}>{e}</Text>
               ))}
             </BlockStack>
@@ -684,6 +886,15 @@ export default function TrailBaitSource() {
             </IndexTable>
         </Card>
       </BlockStack>
+      {showConflictModal && (
+        <ConflictResolutionModal
+          pushResult={pushResult}
+          onDismiss={(result) => {
+            setModalDismissed(true);
+            if (result) setResolvedPushResult(result);
+          }}
+        />
+      )}
     </Page>
   );
 }
