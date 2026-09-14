@@ -29,6 +29,7 @@ import { buildStagedQuery } from "../utils/stagedQuery.server";
 import { upsertStagedProducts } from "../utils/stagedUpsert.server";
 import { recalculateStagedPrices } from "../utils/recalcPricing.server";
 import { getSourceSettings, saveSourceSettings } from "../utils/sourceSettings.server";
+import { bushdoofPricing, DEFAULT_SETTINGS as PRICING_DEFAULTS } from "../utils/pricingFormulas";
 
 // Was bushdoof.com.au in the original scaffold with a TODO to confirm —
 // verified their real storefront is bushdoof.co (Shopify-hosted,
@@ -38,19 +39,10 @@ const BUSHDOOF_BRAND = "BUSHDOOF";
 const BUSHDOOF_LOGO = "https://bushdoof.co/cdn/shop/files/BD_Icon_-_3.png?v=1746064836";
 
 // Editable via the Pricing formula card below — persisted in
-// SourceSettings, these are just the fallback if nothing's been saved yet.
-// Cost (ZAR) = AUD price x costMultiplier. Retail (ZAR) = Cost x
-// retailMarkup, rounded to the *nearest* R99 (not rounded up, per the
-// original Bushdoof Node script's formula — differs from
-// STEDI/TrailBait's round-up rule).
-const DEFAULT_SETTINGS = { costMultiplier: 13.5, retailMarkup: 1.3 };
-
-function bushdoofPricing(priceForeign, settings) {
-  const costZar = Math.round(priceForeign * settings.costMultiplier * 100) / 100;
-  const rawRetail = costZar * settings.retailMarkup;
-  const retailZar = Math.round((rawRetail + 1) / 100) * 100 - 1; // nearest X99
-  return { retailZar, costZar, priceIsEstimated: true };
-}
+// SourceSettings, this is just the fallback if nothing's been saved yet.
+// The formula itself lives in utils/pricingFormulas.js, shared with the
+// consolidated Settings page so the two can't drift out of sync.
+const DEFAULT_SETTINGS = PRICING_DEFAULTS.BUSHDOOF;
 
 const TABS = [
   { id: "all", label: "All", filter: {} },

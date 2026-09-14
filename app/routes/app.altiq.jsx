@@ -29,6 +29,7 @@ import { buildStagedQuery } from "../utils/stagedQuery.server";
 import { upsertStagedProducts } from "../utils/stagedUpsert.server";
 import { recalculateStagedPrices } from "../utils/recalcPricing.server";
 import { getSourceSettings, saveSourceSettings } from "../utils/sourceSettings.server";
+import { altiqPricing, DEFAULT_SETTINGS as PRICING_DEFAULTS } from "../utils/pricingFormulas";
 
 const ALTIQ_DOMAIN = "altiq.com.au";
 const ALTIQ_BRAND = "ALTIQ";
@@ -38,20 +39,10 @@ const ALTIQ_BRAND = "ALTIQ";
 const ALTIQ_LOGO = "https://altiq.com.au/cdn/shop/files/Altiq_Wordmark_Icon_Reverse.png?v=1696495680&width=150";
 
 // Editable via the Pricing formula card below — persisted in
-// SourceSettings, these are just the fallback if nothing's been saved yet.
-// Same round-up-to-R99 shape as TrailBait/Bushdoof/STEDI: retail = AUD
-// price x multiplier, rounded up to the nearest R99; cost = retail x
-// costRatio. ALTIQ previously used a flat round-to-cent formula with no
-// cost value at all — inconsistent with the other three sources, and
-// meant ALTIQ products were pushing to Shopify with no cost-per-item.
-const DEFAULT_SETTINGS = { retailMultiplier: 24.5, costRatio: 0.6 };
-
-function altiqPricing(priceForeign, settings) {
-  const raw = priceForeign * settings.retailMultiplier;
-  const retailZar = Math.ceil((raw + 1) / 100) * 100 - 1;
-  const costZar = Math.round(retailZar * settings.costRatio * 100) / 100;
-  return { retailZar, costZar, priceIsEstimated: true };
-}
+// SourceSettings, this is just the fallback if nothing's been saved yet.
+// The formula itself lives in utils/pricingFormulas.js, shared with the
+// consolidated Settings page so the two can't drift out of sync.
+const DEFAULT_SETTINGS = PRICING_DEFAULTS.ALTIQ;
 
 const TABS = [
   { id: "all", label: "All", filter: {} },

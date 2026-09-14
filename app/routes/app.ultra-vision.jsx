@@ -29,6 +29,7 @@ import { productIdToAdminPath } from "../utils/shopify";
 import { buildStagedQuery } from "../utils/stagedQuery.server";
 import { upsertStagedProducts } from "../utils/stagedUpsert.server";
 import { getSourceSettings, saveSourceSettings } from "../utils/sourceSettings.server";
+import { ultraVisionPricing, DEFAULT_SETTINGS as PRICING_DEFAULTS } from "../utils/pricingFormulas";
 
 const UV_BRAND = "Ultra Vision";
 const UV_LOGO = "https://ultra-vision.com.au/wp-content/uploads/2021/06/UV-Logo.png";
@@ -36,17 +37,12 @@ const UV_LOGO = "https://ultra-vision.com.au/wp-content/uploads/2021/06/UV-Logo.
 // No distributor cost pricelist is fetchable via URL (it's a private
 // file the standalone app took as a manual upload) — that's the primary
 // cost-driven formula from the old app, and isn't built here yet. This
-// is the fallback formula from the same app's notes: retail = AUD SRP x
-// multiplier, rounded to the nearest X90. Always flagged as estimated
-// since there's no landed-cost basis behind it.
-const DEFAULT_SETTINGS = { srpMultiplier: 18 };
-
-function ultraVisionPricing(srpForeign, settings) {
-  const raw = srpForeign * settings.srpMultiplier;
-  const retailZar = Math.round((raw + 10) / 100) * 100 - 10;
-  return { retailZar, costZar: null, priceIsEstimated: true };
-}
-
+// is the fallback formula from the same app's notes, shared with the
+// consolidated Settings page (utils/pricingFormulas.js) so the two can't
+// drift out of sync: retail = AUD SRP x multiplier, rounded to the
+// nearest X90. Always flagged as estimated since there's no landed-cost
+// basis behind it.
+const DEFAULT_SETTINGS = PRICING_DEFAULTS.ULTRA_VISION;
 const TABS = [
   { id: "all", label: "All", filter: {} },
   { id: "new", label: "New", filter: { status: { in: ["NEW", "NEEDS_REVIEW"] } } },

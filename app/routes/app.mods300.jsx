@@ -29,23 +29,16 @@ import { buildStagedQuery } from "../utils/stagedQuery.server";
 import { upsertStagedProducts } from "../utils/stagedUpsert.server";
 import { recalculateStagedPrices } from "../utils/recalcPricing.server";
 import { getSourceSettings, saveSourceSettings } from "../utils/sourceSettings.server";
+import { mods300Pricing, DEFAULT_SETTINGS as PRICING_DEFAULTS } from "../utils/pricingFormulas";
 
 const MODS300_DOMAIN = "www.300mods.com.au";
 const MODS300_BRAND = "4x4 Factory";
 
 // Editable via the Pricing formula card below — persisted in
-// SourceSettings, these are just the fallback if nothing's been saved yet.
-// Same round-up-to-R99 shape as TrailBait/Bushdoof/STEDI: retail = AUD
-// price x multiplier, rounded up to the nearest R99; cost = retail x
-// costRatio.
-const DEFAULT_SETTINGS = { retailMultiplier: 24.5, costRatio: 0.6 };
-
-function mods300Pricing(priceForeign, settings) {
-  const raw = priceForeign * settings.retailMultiplier;
-  const retailZar = Math.ceil((raw + 1) / 100) * 100 - 1;
-  const costZar = Math.round(retailZar * settings.costRatio * 100) / 100;
-  return { retailZar, costZar, priceIsEstimated: true };
-}
+// SourceSettings, this is just the fallback if nothing's been saved yet.
+// The formula itself lives in utils/pricingFormulas.js, shared with the
+// consolidated Settings page so the two can't drift out of sync.
+const DEFAULT_SETTINGS = PRICING_DEFAULTS.MODS300;
 
 // 300mods runs Shopify Markets (multi-currency — confirmed via its own
 // country/currency selector, unlike ALTIQ/TrailBait/Bushdoof). Shopify's

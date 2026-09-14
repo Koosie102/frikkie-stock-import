@@ -31,21 +31,16 @@ import { buildStagedQuery } from "../utils/stagedQuery.server";
 import { upsertStagedProducts } from "../utils/stagedUpsert.server";
 import { recalculateStagedPrices } from "../utils/recalcPricing.server";
 import { getSourceSettings, saveSourceSettings } from "../utils/sourceSettings.server";
+import { stediPricing, DEFAULT_SETTINGS as PRICING_DEFAULTS } from "../utils/pricingFormulas";
 
 const STEDI_BRAND = "STEDI";
 const STEDI_LOGO = "https://www.stedi.com.au/media/logo/stores/1/STEDI_HORIZONTAL_LOGO_WHITE.png";
 
-// Editable via the Pricing formula card below. Same formula as TrailBait:
-// retail = AUD price x sourceMultiplier, rounded up to nearest R99;
-// cost = retail x costRatio.
-const DEFAULT_SETTINGS = { sourceMultiplier: 24, costRatio: 0.6 };
-
-function stediPricing(priceForeign, settings) {
-  const raw = priceForeign * settings.sourceMultiplier;
-  const retailZar = Math.ceil((raw + 1) / 100) * 100 - 1;
-  const costZar = Math.round(retailZar * settings.costRatio * 100) / 100;
-  return { retailZar, costZar, priceIsEstimated: true };
-}
+// Editable via the Pricing formula card below — persisted in
+// SourceSettings, this is just the fallback if nothing's been saved yet.
+// The formula itself lives in utils/pricingFormulas.js, shared with the
+// consolidated Settings page so the two can't drift out of sync.
+const DEFAULT_SETTINGS = PRICING_DEFAULTS.STEDI;
 
 const TABS = [
   { id: "all", label: "All", filter: {} },

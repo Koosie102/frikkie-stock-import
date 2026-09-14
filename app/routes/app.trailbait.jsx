@@ -29,23 +29,17 @@ import { buildStagedQuery } from "../utils/stagedQuery.server";
 import { upsertStagedProducts } from "../utils/stagedUpsert.server";
 import { recalculateStagedPrices } from "../utils/recalcPricing.server";
 import { getSourceSettings, saveSourceSettings } from "../utils/sourceSettings.server";
+import { trailbaitPricing, DEFAULT_SETTINGS as PRICING_DEFAULTS } from "../utils/pricingFormulas";
 
 const TRAILBAIT_DOMAIN = "trailbait.com.au";
 const TRAILBAIT_BRAND = "TRAILBAIT";
 const TRAILBAIT_LOGO = "https://trailbait.com.au/cdn/shop/files/LOGO3_FC_1200x1200.jpg?v=1669804969";
 
 // Editable via the Pricing formula card below — persisted in
-// SourceSettings, these are just the fallback if nothing's been saved yet.
-// Retail (ZAR) = AUD price x sourceMultiplier, rounded up to nearest R99.
-// Cost (ZAR) = Retail x costRatio.
-const DEFAULT_SETTINGS = { sourceMultiplier: 24, costRatio: 0.6 };
-
-function trailbaitPricing(priceForeign, settings) {
-  const raw = priceForeign * settings.sourceMultiplier;
-  const retailZar = Math.ceil((raw + 1) / 100) * 100 - 1; // round up to nearest R99
-  const costZar = Math.round(retailZar * settings.costRatio * 100) / 100;
-  return { retailZar, costZar, priceIsEstimated: true };
-}
+// SourceSettings, this is just the fallback if nothing's been saved yet.
+// The formula itself lives in utils/pricingFormulas.js, shared with the
+// consolidated Settings page so the two can't drift out of sync.
+const DEFAULT_SETTINGS = PRICING_DEFAULTS.TRAILBAIT;
 
 const TABS = [
   { id: "all", label: "All", filter: {} },
