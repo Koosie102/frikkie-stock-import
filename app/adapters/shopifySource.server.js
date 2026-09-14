@@ -63,11 +63,27 @@ export function mapShopifyProduct(product, sourceDomain, retailMultiplier = 24.5
   // A single-variant product with no real options reports one option
   // named "Title" with the single value "Default Title" — treat that as
   // "no options" rather than building a pointless Title dropdown.
+  //
+  // Checking the option's NAME alone isn't a reliable signal for this —
+  // confirmed as a real bug: a genuinely multi-variant product whose
+  // single option happens to also be named "Title" (uncommon, but real)
+  // was being wrongly treated as "no real options" here, which meant
+  // pushStagedProduct sent an empty productOptions/variants array on
+  // push for it. Confirmed against Shopify's own productSet docs that
+  // this is literally their documented way to collapse a product back
+  // down to a single default variant — explains exactly the reported
+  // symptom (correct variant count shown in the review table, but only
+  // 1 variant after pushing). The actual unambiguous signature of "no
+  // real options" is the full combination: exactly one variant, one
+  // option named "Title", AND that variant's own value being literally
+  // "Default Title" — not just the option's name on its own.
   const rawOptionNames = (product.options || []).map((o) => o.name);
-  const hasRealOptions = !(
-    rawOptionNames.length === 1 && rawOptionNames[0] === "Title"
-  );
-  const optionNames = hasRealOptions ? rawOptionNames : [];
+  const isTrueDefaultVariant =
+    product.variants.length === 1 &&
+    rawOptionNames.length === 1 &&
+    rawOptionNames[0] === "Title" &&
+    product.variants[0]?.option1 === "Default Title";
+  const optionNames = isTrueDefaultVariant ? [] : rawOptionNames;
 
   const priceOf = (priceForeign) =>
     pricingFn ? pricingFn(priceForeign) : { retailZar: Math.round(priceForeign * retailMultiplier * 100) / 100 };
