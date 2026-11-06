@@ -12,6 +12,12 @@ export const DEFAULT_SETTINGS = {
   STEDI: { sourceMultiplier: 24, costRatio: 0.6 },
   MODS300: { retailMultiplier: 24.5, costRatio: 0.6 },
   ULTRA_VISION: { srpMultiplier: 18 },
+  // RMB → ZAR has no public exchange-rate feed behind it (same as every
+  // other source's multiplier) — rmbMultiplier is Coenraad's own
+  // all-in landed factor (covers FX + shipping + duty), not a live FX
+  // rate, and is editable from the Settings page same as any other
+  // source's numbers.
+  MAGICSTAR: { rmbMultiplier: 6, retailMarkup: 1.5 },
 };
 
 // Retail = AUD price x multiplier, rounded up to nearest R99.
@@ -65,6 +71,17 @@ export function ultraVisionPricing(srpForeign, settings) {
   return { retailZar, costZar: null, priceIsEstimated: true };
 }
 
+// Cost = RMB price x rmbMultiplier (Coenraad's own landed-cost factor —
+// covers FX + shipping/duty, not a live exchange rate).
+// Retail = Cost x retailMarkup, rounded to the *nearest* R99 (not always
+// rounded up — same rounding style as Bushdoof's formula above).
+export function magicstarPricing(priceForeign, settings) {
+  const costZar = Math.round(priceForeign * settings.rmbMultiplier * 100) / 100;
+  const rawRetail = costZar * settings.retailMarkup;
+  const retailZar = Math.round((rawRetail + 1) / 100) * 100 - 1;
+  return { retailZar, costZar, priceIsEstimated: false };
+}
+
 export const PRICING_FUNCTIONS = {
   ALTIQ: altiqPricing,
   TRAILBAIT: trailbaitPricing,
@@ -72,4 +89,5 @@ export const PRICING_FUNCTIONS = {
   STEDI: stediPricing,
   MODS300: mods300Pricing,
   ULTRA_VISION: ultraVisionPricing,
+  MAGICSTAR: magicstarPricing,
 };

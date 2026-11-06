@@ -15,4 +15,12 @@ export const VENDOR_NAMES = {
   // imports recognize them as the same products (SKU/fuzzy match, push
   // update-in-place) instead of treating them as duplicates.
   MODS300: "4x4 Factory Products",
+  // Deliberately not "MagicStar" or "Magicstar" — these are rebadged under
+  // Coenraad's own new brand, WOEST off-road equipment, rather than the
+  // Chinese manufacturer's name. The specific product line under WOEST is
+  // "WOEST Caraq" — that part is a title prefix (see magicstarPdf.server.js
+  // buildTitle), not the vendor, so every WOEST product still groups under
+  // one vendor for collections/reporting even as more WOEST sub-lines get
+  // added later.
+  MAGICSTAR: "WOEST",
 };

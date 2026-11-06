@@ -13,6 +13,7 @@ const SOURCES = [
   { key: "ALTIQ", label: "ALTIQ", path: "/app/altiq", note: "Shopify products.json" },
   { key: "TRAILBAIT", label: "TrailBait", path: "/app/trailbait", note: "Shopify products.json" },
   { key: "MODS300", label: "300mods", path: "/app/mods300", note: "Shopify products.json" },
+  { key: "MAGICSTAR", label: "MagicStar", path: "/app/magicstar", note: "PDF pricelist upload" },
 ];
 
 const MANAGE_LINKS = [

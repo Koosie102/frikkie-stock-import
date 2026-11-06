@@ -37,6 +37,7 @@ enum Source {
   ALTIQ
   TRAILBAIT
   MODS300
+  MAGICSTAR
 }
 
 enum ImportStatus {
@@ -124,4 +125,19 @@ model CollectionDef {
   updatedAt           DateTime @updatedAt
 
   @@index([source])
+}
+
+// MagicStar has no website or API — its catalog only exists as a PDF
+// pricelist, with a real product photo embedded per row instead of a
+// fetchable image URL. This stores each extracted photo (keyed by SKU, so
+// re-uploading a refreshed pricelist replaces the same row's photo rather
+// than piling up duplicates) so files.magicstar.$sku.jsx can serve it at
+// a public URL — productSet (shopifyPush.server.js) only ever accepts an
+// already-public image URL for `originalSource`, same as it does for
+// every other source's own supplier-hosted image URLs.
+model MagicstarImage {
+  sku       String   @id
+  mimeType  String
+  data      Bytes
+  updatedAt DateTime @updatedAt
 }
