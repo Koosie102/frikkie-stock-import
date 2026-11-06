@@ -261,11 +261,11 @@ export const action = async ({ request }) => {
 
   if (intent === "updateSettings") {
     const costMultiplier = parseFloat(formData.get("costMultiplier"));
-    const retailMultiplier = parseFloat(formData.get("retailMultiplier"));
-    if (Number.isNaN(costMultiplier) || costMultiplier <= 0 || Number.isNaN(retailMultiplier) || retailMultiplier <= 0) {
+    const retailMarkup = parseFloat(formData.get("retailMarkup"));
+    if (Number.isNaN(costMultiplier) || costMultiplier <= 0 || Number.isNaN(retailMarkup) || retailMarkup <= 0) {
       return { ok: false, mode: "updateSettings", error: "Both values must be positive numbers." };
     }
-    const settings = { costMultiplier, retailMultiplier };
+    const settings = { costMultiplier, retailMarkup };
     await saveSourceSettings(db, "OZZ", settings);
 
     // Recalculate every already-merged variant's price from its stored EUR
@@ -578,7 +578,7 @@ function PricingFormulaCard({ settings }) {
   const saving = settingsFetcher.state !== "idle";
   const result = settingsFetcher.data;
   const [costMultiplier, setCostMultiplier] = useState(String(settings.costMultiplier));
-  const [retailMultiplier, setRetailMultiplier] = useState(String(settings.retailMultiplier));
+  const [retailMarkup, setRetailMarkup] = useState(String(settings.retailMarkup));
 
   return (
     <Card>
@@ -586,23 +586,22 @@ function PricingFormulaCard({ settings }) {
         <Text as="h2" variant="headingMd">Pricing formula</Text>
         <Text as="p" tone="subdued">
           Cost (ZAR) = the pricelist's Wholesale (EUR) figure × cost
-          multiplier. Retail (ZAR) = Wholesale (EUR) × retail multiplier,
-          rounded to the nearest R99 — unlike every other source here,
-          Retail isn't derived from Cost, it's its own direct multiplier
-          of the EUR figure. Both are Coenraad's own all-in factors (FX +
-          SA shipping/duty/margin baked in). Saving recalculates every
-          already-merged price immediately, no re-upload needed.
+          multiplier. Retail (ZAR) = Cost × markup, rounded to the nearest
+          R99. Both are Coenraad's own all-in factors (the cost multiplier
+          covers FX + SA shipping/duty, not a live exchange rate). Saving
+          recalculates every already-merged price immediately, no
+          re-upload needed.
         </Text>
         {result?.mode === "updateSettings" && result.ok === false && <Banner tone="critical">{result.error}</Banner>}
         {result?.mode === "updateSettings" && result.ok === true && <Banner tone="success">Saved and recalculated.</Banner>}
         <settingsFetcher.Form method="post">
           <input type="hidden" name="intent" value="updateSettings" />
           <InlineStack gap="200" blockAlign="end">
-            <div style={{ maxWidth: 200 }}>
+            <div style={{ maxWidth: 220 }}>
               <TextField label="Cost multiplier (× EUR)" type="number" step="0.01" name="costMultiplier" value={costMultiplier} onChange={setCostMultiplier} autoComplete="off" />
             </div>
-            <div style={{ maxWidth: 200 }}>
-              <TextField label="Retail multiplier (× EUR)" type="number" step="0.01" name="retailMultiplier" value={retailMultiplier} onChange={setRetailMultiplier} autoComplete="off" />
+            <div style={{ maxWidth: 180 }}>
+              <TextField label="Retail markup (× Cost)" type="number" step="0.05" name="retailMarkup" value={retailMarkup} onChange={setRetailMarkup} autoComplete="off" />
             </div>
             <Button submit loading={saving} variant="primary">Save</Button>
           </InlineStack>
