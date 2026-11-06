@@ -2,10 +2,11 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { buildStagedProductsCsv } from "../utils/csvExport.server";
 
-// NANJING added here so this route's new "Export CSV" button actually
-// works — MODS300 and MAGICSTAR were already missing from this set before
-// this change (pre-existing, left as-is; not this route's scope to fix).
-const VALID_SOURCES = new Set(["STEDI", "BUSHDOOF", "ULTRA_VISION", "ALTIQ", "TRAILBAIT", "NANJING"]);
+// NANJING and OZZ added here so each new source's "Export CSV" button
+// actually works — MODS300 and MAGICSTAR were already missing from this
+// set before this change (pre-existing, left as-is; not this route's
+// scope to fix).
+const VALID_SOURCES = new Set(["STEDI", "BUSHDOOF", "ULTRA_VISION", "ALTIQ", "TRAILBAIT", "NANJING", "OZZ"]);
 
 const TAB_FILTERS = {
   all: {},

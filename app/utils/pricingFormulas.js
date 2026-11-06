@@ -21,6 +21,11 @@ export const DEFAULT_SETTINGS = {
   // Same deal as MAGICSTAR's rmbMultiplier — Coenraad's own all-in
   // landed-cost factor, not a live USD/ZAR rate.
   NANJING: { usdMultiplier: 44.44, retailMarkup: 1.5 },
+  // [stated] Coenraad's own real numbers — unlike every other source
+  // here, Cost and Retail are each their own direct multiplier of the
+  // Wholesale (EUR) figure, not a cost-then-markup chain (see ozzPricing
+  // below).
+  OZZ: { costMultiplier: 43.41, retailMultiplier: 131.4 },
 };
 
 // Retail = AUD price x multiplier, rounded up to nearest R99.
@@ -96,6 +101,20 @@ export function nanjingPricing(priceForeign, settings) {
   return { retailZar, costZar, priceIsEstimated: false };
 }
 
+// Unlike every other source's formula here, Cost and Retail are each
+// their own direct multiplier of the Wholesale (EUR) figure — not a
+// cost-then-markup chain. Both multipliers are Coenraad's own all-in
+// factors (FX + SA shipping/duty/margin baked in, not a live exchange
+// rate). Retail rounds to the *nearest* R99, same rounding style as
+// Bushdoof's/MagicStar's/Nanjing's formulas above; Cost is just rounded
+// to cents, same as every other source's cost figure.
+export function ozzPricing(priceForeign, settings) {
+  const costZar = Math.round(priceForeign * settings.costMultiplier * 100) / 100;
+  const rawRetail = priceForeign * settings.retailMultiplier;
+  const retailZar = Math.round((rawRetail + 1) / 100) * 100 - 1;
+  return { retailZar, costZar, priceIsEstimated: false };
+}
+
 export const PRICING_FUNCTIONS = {
   ALTIQ: altiqPricing,
   TRAILBAIT: trailbaitPricing,
@@ -105,4 +124,5 @@ export const PRICING_FUNCTIONS = {
   ULTRA_VISION: ultraVisionPricing,
   MAGICSTAR: magicstarPricing,
   NANJING: nanjingPricing,
+  OZZ: ozzPricing,
 };

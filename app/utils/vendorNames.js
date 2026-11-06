@@ -28,4 +28,7 @@ export const VENDOR_NAMES = {
   // nanjingPdf.server.js, not a separate vendor, so both sub-lines still
   // group under one vendor for collections/reporting.
   NANJING: "WOEST",
+  // OZZ sells under its own name, no WOEST rebrand (unlike MagicStar/
+  // Nanjing) — nothing's been said to the contrary.
+  OZZ: "OZZ",
 };

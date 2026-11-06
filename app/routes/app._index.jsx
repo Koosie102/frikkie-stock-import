@@ -15,6 +15,7 @@ const SOURCES = [
   { key: "MODS300", label: "300mods", path: "/app/mods300", note: "Shopify products.json" },
   { key: "MAGICSTAR", label: "MagicStar", path: "/app/magicstar", note: "PDF pricelist upload" },
   { key: "NANJING", label: "Nanjing (WOEST Kudu/Veldt)", path: "/app/nanjing", note: "PDF pricelist upload" },
+  { key: "OZZ", label: "OZZ Lights", path: "/app/ozz", note: "WooCommerce + pricelist (pricing pending)" },
 ];
 
 const MANAGE_LINKS = [

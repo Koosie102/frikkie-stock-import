@@ -21,6 +21,50 @@ async function fetchJson(path) {
   return data;
 }
 
+// Generic, site-parameterized versions of the two fetchers above — added
+// for OZZ (also WooCommerce), which needs the exact same Store API calls
+// against a different domain. The Ultra Vision-specific exports below are
+// left exactly as they were (same signatures, same hardcoded BASE_URL) so
+// nothing about that source changes; they could be rewritten as thin
+// wrappers around these, but leaving them untouched is zero-risk.
+async function fetchJsonFrom(baseUrl, path) {
+  const res = await fetch(`${baseUrl}${path}`, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${path}`);
+  const data = await res.json();
+  await sleep(REQUEST_DELAY_MS);
+  return data;
+}
+
+export async function fetchAllWooProducts(baseUrl) {
+  const all = [];
+  let page = 1;
+  while (true) {
+    const products = await fetchJsonFrom(baseUrl, `/wp-json/wc/store/v1/products?page=${page}&per_page=${PER_PAGE}`);
+    if (!Array.isArray(products) || products.length === 0) break;
+    all.push(...products);
+    if (products.length < PER_PAGE) break; // last page
+    page += 1;
+    if (page > 50) break; // sanity guard
+  }
+  return all;
+}
+
+// Same type=variation filtering approach as fetchAllVariations below —
+// see that function's comment for why (no authenticated-API dependency).
+export async function fetchAllWooVariations(baseUrl) {
+  const all = [];
+  let page = 1;
+  while (true) {
+    const variations = await fetchJsonFrom(baseUrl, `/wp-json/wc/store/v1/products?type=variation&page=${page}&per_page=${PER_PAGE}`);
+    if (!Array.isArray(variations) || variations.length === 0) break;
+    all.push(...variations);
+    if (variations.length < PER_PAGE) break;
+    page += 1;
+    if (page > 50) break; // sanity guard
+  }
+  return all;
+}
+
 // WooCommerce Store API returns prices as integer strings in "minor
 // units" (cents) — a price of $11.05 comes back as {"price": "1105",
 // "currency_minor_unit": 2}, NOT "11.05". Missing this is a well-known

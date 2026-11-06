@@ -39,6 +39,7 @@ enum Source {
   MODS300
   MAGICSTAR
   NANJING
+  OZZ
 }
 
 enum ImportStatus {
