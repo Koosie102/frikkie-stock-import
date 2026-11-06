@@ -23,4 +23,9 @@ export const VENDOR_NAMES = {
   // one vendor for collections/reporting even as more WOEST sub-lines get
   // added later.
   MAGICSTAR: "WOEST",
+  // Same WOEST brand as MagicStar — Kudu (driving lights/spotlights/
+  // light bars) vs Veldt (everything else) is a title prefix baked in by
+  // nanjingPdf.server.js, not a separate vendor, so both sub-lines still
+  // group under one vendor for collections/reporting.
+  NANJING: "WOEST",
 };

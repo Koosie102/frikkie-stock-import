@@ -18,6 +18,9 @@ export const DEFAULT_SETTINGS = {
   // rate, and is editable from the Settings page same as any other
   // source's numbers.
   MAGICSTAR: { rmbMultiplier: 6, retailMarkup: 1.5 },
+  // Same deal as MAGICSTAR's rmbMultiplier — Coenraad's own all-in
+  // landed-cost factor, not a live USD/ZAR rate.
+  NANJING: { usdMultiplier: 44.44, retailMarkup: 1.5 },
 };
 
 // Retail = AUD price x multiplier, rounded up to nearest R99.
@@ -82,6 +85,17 @@ export function magicstarPricing(priceForeign, settings) {
   return { retailZar, costZar, priceIsEstimated: false };
 }
 
+// Cost = USD price x usdMultiplier (Coenraad's own landed-cost factor —
+// covers FX + shipping/duty, not a live exchange rate).
+// Retail = Cost x retailMarkup, rounded to the *nearest* R99 — same
+// rounding style as MagicStar's/Bushdoof's formula above.
+export function nanjingPricing(priceForeign, settings) {
+  const costZar = Math.round(priceForeign * settings.usdMultiplier * 100) / 100;
+  const rawRetail = costZar * settings.retailMarkup;
+  const retailZar = Math.round((rawRetail + 1) / 100) * 100 - 1;
+  return { retailZar, costZar, priceIsEstimated: false };
+}
+
 export const PRICING_FUNCTIONS = {
   ALTIQ: altiqPricing,
   TRAILBAIT: trailbaitPricing,
@@ -90,4 +104,5 @@ export const PRICING_FUNCTIONS = {
   MODS300: mods300Pricing,
   ULTRA_VISION: ultraVisionPricing,
   MAGICSTAR: magicstarPricing,
+  NANJING: nanjingPricing,
 };

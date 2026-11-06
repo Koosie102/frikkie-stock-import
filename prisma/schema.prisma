@@ -38,6 +38,7 @@ enum Source {
   TRAILBAIT
   MODS300
   MAGICSTAR
+  NANJING
 }
 
 enum ImportStatus {
@@ -137,6 +138,16 @@ model CollectionDef {
 // every other source's own supplier-hosted image URLs.
 model MagicstarImage {
   sku       String   @id
+  mimeType  String
+  data      Bytes
+  updatedAt DateTime @updatedAt
+}
+
+// Same idea as MagicstarImage, for Nanjing Jiuguang's PDF pricelist — keyed
+// by imageKey rather than sku, because several staged rows (one per size/
+// variant, see nanjingPdf.server.js) can legitimately share one photo.
+model NanjingImage {
+  imageKey  String   @id
   mimeType  String
   data      Bytes
   updatedAt DateTime @updatedAt
