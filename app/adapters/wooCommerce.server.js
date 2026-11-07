@@ -133,13 +133,30 @@ async function fetchJsonFrom(baseUrl, path) {
   return data;
 }
 
+// 2026-11-07: confirmed on OZZ (ozzlights.com) that its Store API ignores
+// the page/per_page query params entirely — page=1 and page=2 (same
+// per_page) came back byte-identical, almost certainly a caching layer
+// keying on the URL path alone. Without a check for this, the old
+// end-of-pages test ("this page had fewer than PER_PAGE items") never
+// fires — the same list just keeps coming back >= PER_PAGE — so the loop
+// ran all the way to its 50-page safety cap: 50 near-identical requests
+// in a row. That's a very plausible explanation for the anti-bot
+// blocking seen on this same site the same day (first "Unexpected token
+// '<'", then "socket hang up") — a self-inflicted request storm, not
+// necessarily OZZ blocking a single legitimate request. Fixed generically
+// (benign for any normally-paginating site too): track every product id
+// already seen, and stop as soon as a "page" contributes nothing new.
 export async function fetchAllWooProducts(baseUrl) {
   const all = [];
+  const seenIds = new Set();
   let page = 1;
   while (true) {
     const products = await fetchJsonFrom(baseUrl, `/wp-json/wc/store/v1/products?page=${page}&per_page=${PER_PAGE}`);
     if (!Array.isArray(products) || products.length === 0) break;
-    all.push(...products);
+    const newProducts = products.filter((p) => !seenIds.has(p.id));
+    if (newProducts.length === 0) break; // this "page" was a repeat — nothing left to find
+    for (const p of newProducts) seenIds.add(p.id);
+    all.push(...newProducts);
     if (products.length < PER_PAGE) break; // last page
     page += 1;
     if (page > 50) break; // sanity guard
@@ -149,13 +166,18 @@ export async function fetchAllWooProducts(baseUrl) {
 
 // Same type=variation filtering approach as fetchAllVariations below —
 // see that function's comment for why (no authenticated-API dependency).
+// Same non-paginating-site guard as fetchAllWooProducts above.
 export async function fetchAllWooVariations(baseUrl) {
   const all = [];
+  const seenIds = new Set();
   let page = 1;
   while (true) {
     const variations = await fetchJsonFrom(baseUrl, `/wp-json/wc/store/v1/products?type=variation&page=${page}&per_page=${PER_PAGE}`);
     if (!Array.isArray(variations) || variations.length === 0) break;
-    all.push(...variations);
+    const newVariations = variations.filter((v) => !seenIds.has(v.id));
+    if (newVariations.length === 0) break;
+    for (const v of newVariations) seenIds.add(v.id);
+    all.push(...newVariations);
     if (variations.length < PER_PAGE) break;
     page += 1;
     if (page > 50) break; // sanity guard

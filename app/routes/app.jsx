@@ -5,6 +5,7 @@ import { AppProvider as PolarisAppProvider } from "@shopify/polaris";
 import polarisTranslations from "@shopify/polaris/locales/en.json" with { type: "json" };
 import { NavMenu } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
+import { BRAND_LABELS } from "../utils/vendorNames";
 
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
@@ -28,6 +29,9 @@ export default function App() {
           <Link to="/app/altiq">ALTIQ</Link>
           <Link to="/app/trailbait">TrailBait</Link>
           <Link to="/app/mods300">300mods</Link>
+          <Link to="/app/magicstar">{BRAND_LABELS.MAGICSTAR}</Link>
+          <Link to="/app/nanjing">{BRAND_LABELS.NANJING}</Link>
+          <Link to="/app/ozz">{BRAND_LABELS.OZZ}</Link>
           <Link to="/app/collections">Collections</Link>
           <Link to="/app/settings">Settings</Link>
         </NavMenu>
