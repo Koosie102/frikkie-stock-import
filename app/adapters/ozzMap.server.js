@@ -11,14 +11,43 @@ import { formatProductTitle } from "../utils/text";
 // anyway (see utils/stagedUpsert.server.js), so this two-step shape is
 // safe: fetch first, upload pricelist whenever, re-fetch later without
 // losing merged prices.
+// Coenraad's own tag vocabulary for OZZ's categories — NOT OZZ's own
+// category names, which don't match what he wants tagged (e.g. OZZ calls
+// it "LED driving lights", he wants the tag "spotlights"). Confirmed
+// against the real 12-category list on ozzlights.com's WooCommerce store
+// via a live fetch (not guessed), and keyed by slug rather than display
+// name since the two diverge for at least one category — "LED work
+// lights" displays under that name but its slug is "work-lights", and
+// Coenraad confirmed the tag he wants is "work lights" (with a space),
+// not the raw slug.
+const CATEGORY_TAG_MAP = {
+  "led-driving-lights": "spotlights",
+  "led-light-bars": "lightbar",
+  "grille-kits": "grill",
+  "led-headlights": "head",
+  "led-tail-light": "tail",
+  "led-warning-lights": "warning",
+  "work-lights": "work lights",
+  cables: "wiring", // OZZ's own category is "Cables" — Coenraad calls this "Wiring"
+  mounts: "brackets",
+  merchandise: "merch",
+  "lens-covers": "accessories", // merged into the same bucket as the generic Accessories category below
+  accessories: "accessories",
+};
+
 function tagsFromCategories(categories) {
   const tags = [];
   const seen = new Set();
   for (const cat of categories || []) {
-    const clean = (cat?.name || "").toLowerCase().trim().replace(/\s+/g, "-");
-    if (clean && !seen.has(clean)) {
-      seen.add(clean);
-      tags.push(clean);
+    const slug = (cat?.slug || "").toLowerCase().trim();
+    if (!slug) continue;
+    // Falls back to a humanized slug for any category OZZ adds later
+    // that isn't in the map above yet, rather than silently dropping it
+    // — flag it to Coenraad so the map above can be extended.
+    const tag = CATEGORY_TAG_MAP[slug] || slug.replace(/-/g, " ");
+    if (!seen.has(tag)) {
+      seen.add(tag);
+      tags.push(tag);
     }
   }
   return tags;
