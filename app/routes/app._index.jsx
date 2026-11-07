@@ -2,6 +2,7 @@ import { Link, useLoaderData } from "@remix-run/react";
 import { Page, Card, BlockStack, InlineStack, Text, Badge } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { BRAND_LABELS } from "../utils/vendorNames";
 
 const HERO_IMAGE =
   "https://cdn.shopify.com/s/files/1/0539/2878/8145/files/4x4_Factory_Logo_-_Banner_suppliers.png?v=1785162136";
@@ -13,9 +14,9 @@ const SOURCES = [
   { key: "ALTIQ", label: "ALTIQ", path: "/app/altiq", note: "Shopify products.json" },
   { key: "TRAILBAIT", label: "TrailBait", path: "/app/trailbait", note: "Shopify products.json" },
   { key: "MODS300", label: "300mods", path: "/app/mods300", note: "Shopify products.json" },
-  { key: "MAGICSTAR", label: "MagicStar", path: "/app/magicstar", note: "PDF pricelist upload" },
-  { key: "NANJING", label: "Nanjing (WOEST Kudu/Veldt)", path: "/app/nanjing", note: "PDF pricelist upload" },
-  { key: "OZZ", label: "OZZ Lights", path: "/app/ozz", note: "WooCommerce + pricelist (pricing pending)" },
+  { key: "MAGICSTAR", label: BRAND_LABELS.MAGICSTAR, path: "/app/magicstar", note: "PDF pricelist upload" },
+  { key: "NANJING", label: BRAND_LABELS.NANJING, path: "/app/nanjing", note: "PDF pricelist upload" },
+  { key: "OZZ", label: BRAND_LABELS.OZZ, path: "/app/ozz", note: "WooCommerce + pricelist (pricing pending)" },
 ];
 
 const MANAGE_LINKS = [

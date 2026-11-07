@@ -27,10 +27,93 @@ async function fetchJson(path) {
 // left exactly as they were (same signatures, same hardcoded BASE_URL) so
 // nothing about that source changes; they could be rewritten as thin
 // wrappers around these, but leaving them untouched is zero-risk.
+//
+// 2026-11-07: OZZ's fetch started failing ("Unexpected token '<' ... is
+// not valid JSON"). Confirmed via an independent fetch from outside this
+// app's own network that ozzlights.com's Store API returns real JSON
+// fine — the request from THIS app's network got an HTML page back
+// instead, with a 200 status. Same network/IP-level anti-bot symptom
+// already solved for STEDI (see stediScraper.server.js), not a bug in
+// the URL or the parsing. Unlike STEDI's block (confirmed permanent),
+// OZZ's may be intermittent bot-scoring rather than a hard rule, so
+// rather than forcing every call through the paid Bright Data Web
+// Unlocker unconditionally, this tries a direct request first — now with
+// real browser-style headers, which the old bare `Accept:
+// application/json` fetch didn't send and some bot filters key on — and
+// only falls back to the Web Unlocker (reusing STEDI's own
+// BRIGHTDATA_API_KEY/BRIGHTDATA_UNLOCKER_ZONE Railway env vars) when the
+// direct request comes back blocked. Either path now fails with a clear,
+// specific error instead of the old cryptic JSON.parse crash.
+const BRIGHTDATA_API_URL = "https://api.brightdata.com/request";
+const BROWSER_HEADERS = {
+  Accept: "application/json",
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+
+// Same challenge-page sniff STEDI's scraper uses (stediScraper.server.js
+// fetchHtml) — a short response containing wording common to
+// Cloudflare/anti-bot interstitials, as opposed to a genuine HTTP error
+// unrelated to bot-blocking (a real 404/500 body).
+function looksLikeBlockPage(text) {
+  return (
+    text.length < 5000 &&
+    /enable javascript|checking your browser|cf-browser-verification|just a moment|attention required/i.test(text)
+  );
+}
+
+async function fetchJsonViaUnlocker(url) {
+  const apiKey = process.env.BRIGHTDATA_API_KEY;
+  const zone = process.env.BRIGHTDATA_UNLOCKER_ZONE;
+  if (!apiKey || !zone) {
+    throw new Error(
+      `Blocked fetching ${url} and BRIGHTDATA_API_KEY/BRIGHTDATA_UNLOCKER_ZONE aren't set, so there's no fallback — these are the same Railway env vars STEDI's scraper needs.`,
+    );
+  }
+  const res = await fetch(BRIGHTDATA_API_URL, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ zone, url, format: "raw" }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`Bright Data Web Unlocker HTTP ${res.status} for ${url}${detail ? `: ${detail.slice(0, 300)}` : ""}`);
+  }
+  const text = await res.text();
+  if (looksLikeBlockPage(text)) {
+    throw new Error(`Blocked/challenge page returned even via Bright Data's Web Unlocker for ${url}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Bright Data Web Unlocker returned non-JSON for ${url}: ${text.slice(0, 200)}`);
+  }
+}
+
 async function fetchJsonFrom(baseUrl, path) {
-  const res = await fetch(`${baseUrl}${path}`, { headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${path}`);
-  const data = await res.json();
+  const url = `${baseUrl}${path}`;
+  const res = await fetch(url, { headers: BROWSER_HEADERS });
+  const text = await res.text();
+
+  if (res.ok) {
+    try {
+      const data = JSON.parse(text);
+      await sleep(REQUEST_DELAY_MS);
+      return data;
+    } catch {
+      // Status 200 but not real JSON — a bot-challenge page served with
+      // a 200, same symptom already seen on STEDI. Fall through to the
+      // Web Unlocker below instead of throwing the old cryptic
+      // "Unexpected token '<'" error.
+    }
+  } else if (!looksLikeBlockPage(text)) {
+    // A real HTTP error (404, 500, etc.) unrelated to bot-blocking — the
+    // Web Unlocker won't fix that, so surface it directly.
+    throw new Error(`HTTP ${res.status} for ${path}: ${text.slice(0, 200)}`);
+  }
+
+  const data = await fetchJsonViaUnlocker(url);
   await sleep(REQUEST_DELAY_MS);
   return data;
 }

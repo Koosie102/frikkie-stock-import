@@ -32,3 +32,23 @@ export const VENDOR_NAMES = {
   // Nanjing) — nothing's been said to the contrary.
   OZZ: "OZZ",
 };
+
+// Display-only brand labels for the dashboard, the Collections tab list,
+// and the default "menu tab title" when syncing a brand's dropdown into
+// the storefront menu — distinct from VENDOR_NAMES above, which is the
+// literal Shopify "vendor" field value used in product/collection
+// matching and must never change to this. Needed because MAGICSTAR and
+// NANJING share one vendor ("WOEST"), which would make their Collections
+// tabs show the same label twice if VENDOR_NAMES were used directly.
+// Coenraad's own labels (2026-11-07): OZZ Lights / WOEST Caraq (MagicStar)
+// / WOEST Kudu/Veldt (Nanjing). Any source not listed here falls back to
+// VENDOR_NAMES.
+export const BRAND_LABELS = {
+  MAGICSTAR: "WOEST Caraq",
+  NANJING: "WOEST Kudu/Veldt",
+  OZZ: "OZZ Lights",
+};
+
+export function brandLabel(source) {
+  return BRAND_LABELS[source] || VENDOR_NAMES[source];
+}

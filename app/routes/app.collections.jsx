@@ -18,10 +18,49 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { fetchVendorProducts } from "../adapters/shopifyMatch.server";
 import { summarizeVendorTags } from "../adapters/shopifyTaxonomy.server";
-import { VENDOR_NAMES } from "../utils/vendorNames";
+import { VENDOR_NAMES, brandLabel } from "../utils/vendorNames";
 import { pushCollectionDef, syncBrandMenu, fetchExistingCollectionsForVendor } from "../adapters/shopifyCollections.server";
 
-const SOURCES = ["STEDI", "BUSHDOOF", "ULTRA_VISION", "ALTIQ", "TRAILBAIT", "MODS300"];
+const SOURCES = [
+  "STEDI",
+  "BUSHDOOF",
+  "ULTRA_VISION",
+  "ALTIQ",
+  "TRAILBAIT",
+  "MODS300",
+  "MAGICSTAR",
+  "NANJING",
+  "OZZ",
+];
+
+// Coenraad's own category/tag vocabulary (2026-11-07), shared across the
+// WOEST-family and OZZ brands — same 12 categories, same tags, just a
+// different brand prefix on the title. "Seed standard categories" below
+// creates one CollectionDef per row for whichever brand tab is open; a
+// brand with no products in a given category (e.g. OZZ has no "Whip
+// Lights" products today) just gets an empty collection until/unless
+// that changes — harmless, and keeps every brand on the same 12 going
+// forward rather than guessing which ones to leave out.
+const STANDARD_CATEGORY_TEMPLATE = [
+  { suffix: "Driving Lights", tag: "spotlights" },
+  { suffix: "Lightbars", tag: "lightbar" },
+  { suffix: "Grill Kits", tag: "grill" },
+  { suffix: "LED Headlights", tag: "head" },
+  { suffix: "LED Tail Lights", tag: "tail" },
+  { suffix: "LED Warning Lights", tag: "warning" },
+  { suffix: "Work Lights", tag: "work lights" },
+  { suffix: "Wiring", tag: "wiring" },
+  { suffix: "Mounts", tag: "brackets" },
+  { suffix: "Merchandise", tag: "merch" },
+  { suffix: "Accessories & Spares", tag: "accessories" },
+  { suffix: "Whip Lights", tag: "whip" },
+];
+
+// Only offered for the brands this template was defined for — the
+// original six sources have their own, different category schemes
+// already set up by hand, and seeding this template onto them would
+// just create confusing duplicates.
+const STANDARD_TEMPLATE_SOURCES = new Set(["MAGICSTAR", "NANJING", "OZZ"]);
 
 // Turns the editable "tags" text field (comma-separated, "!tag" = exclude)
 // into the rules array pushCollectionDef expects, always prefixed with the
@@ -105,6 +144,37 @@ export const action = async ({ request }) => {
     } catch (err) {
       return { ok: false, mode: "syncFromShopify", error: String(err.message || err) };
     }
+  }
+
+  if (intent === "seedStandardCategories") {
+    if (!STANDARD_TEMPLATE_SOURCES.has(source)) {
+      return { ok: false, mode: "seedStandardCategories", error: "No standard template for this brand." };
+    }
+    const existing = await db.collectionDef.findMany({ where: { source }, select: { title: true } });
+    const existingTitles = new Set(existing.map((d) => d.title));
+    const prefix = brandLabel(source);
+    let maxPos = (await db.collectionDef.aggregate({ where: { source }, _max: { position: true } }))._max.position ?? -1;
+    let created = 0;
+    let skipped = 0;
+    for (const row of STANDARD_CATEGORY_TEMPLATE) {
+      const title = `${prefix} - ${row.suffix}`;
+      if (existingTitles.has(title)) {
+        skipped += 1;
+        continue;
+      }
+      maxPos += 1;
+      await db.collectionDef.create({
+        data: {
+          source,
+          title,
+          menuGroup: null,
+          position: maxPos,
+          rules: tagsCsvToRules(source, row.tag),
+        },
+      });
+      created += 1;
+    }
+    return { ok: true, mode: "seedStandardCategories", created, skipped };
   }
 
   if (intent === "addDef") {
@@ -286,15 +356,18 @@ export default function CollectionsTab() {
   const pushAllFetcher = useFetcher();
   const menuFetcher = useFetcher();
   const syncFromShopifyFetcher = useFetcher();
+  const seedFetcher = useFetcher();
 
-  const [brandTabTitle, setBrandTabTitle] = useState(VENDOR_NAMES[source].toUpperCase());
-  useEffect(() => setBrandTabTitle(VENDOR_NAMES[source].toUpperCase()), [source]);
+  const [brandTabTitle, setBrandTabTitle] = useState(brandLabel(source).toUpperCase());
+  useEffect(() => setBrandTabTitle(brandLabel(source).toUpperCase()), [source]);
 
   const selectedTabIndex = SOURCES.indexOf(source);
   const pushAllResult = pushAllFetcher.data;
   const menuResult = menuFetcher.data;
   const syncFromShopifyResult = syncFromShopifyFetcher.data;
+  const seedResult = seedFetcher.data;
   const pushedCount = collectionDefs.filter((d) => d.shopifyCollectionId).length;
+  const hasStandardTemplate = STANDARD_TEMPLATE_SOURCES.has(source);
 
   return (
     <Page title="Collections">
@@ -317,7 +390,7 @@ export default function CollectionsTab() {
 
         <Card padding="0">
           <Tabs
-            tabs={SOURCES.map((s) => ({ id: s, content: VENDOR_NAMES[s] }))}
+            tabs={SOURCES.map((s) => ({ id: s, content: brandLabel(s) }))}
             selected={selectedTabIndex === -1 ? 4 : selectedTabIndex}
             onSelect={(index) => {
               const params = new URLSearchParams(searchParams);
@@ -343,14 +416,23 @@ export default function CollectionsTab() {
         )}
         {syncFromShopifyResult?.mode === "syncFromShopify" && syncFromShopifyResult.ok === true && (
           <Banner tone="success" title="Synced from Shopify">
-            {`Found ${syncFromShopifyResult.found} existing smart collection(s) for ${VENDOR_NAMES[source]} — ${syncFromShopifyResult.created} added, ${syncFromShopifyResult.updated} already tracked and refreshed.`}
+            {`Found ${syncFromShopifyResult.found} existing smart collection(s) for ${brandLabel(source)} — ${syncFromShopifyResult.created} added, ${syncFromShopifyResult.updated} already tracked and refreshed.`}
+          </Banner>
+        )}
+
+        {seedResult?.mode === "seedStandardCategories" && seedResult.ok === false && (
+          <Banner tone="critical" title="Couldn't seed categories">{seedResult.error}</Banner>
+        )}
+        {seedResult?.mode === "seedStandardCategories" && seedResult.ok === true && (
+          <Banner tone="success" title="Standard categories seeded">
+            {`Added ${seedResult.created} collection(s), ${seedResult.skipped} already existed and were left as-is.`}
           </Banner>
         )}
 
         <Card>
           <BlockStack gap="300">
             <InlineStack align="space-between">
-              <Text as="h2" variant="headingMd">{`${VENDOR_NAMES[source]} collections`}</Text>
+              <Text as="h2" variant="headingMd">{`${brandLabel(source)} collections`}</Text>
               <InlineStack gap="200">
                 <syncFromShopifyFetcher.Form method="post">
                   <input type="hidden" name="intent" value="syncFromShopify" />
@@ -359,6 +441,15 @@ export default function CollectionsTab() {
                     Sync existing from Shopify
                   </Button>
                 </syncFromShopifyFetcher.Form>
+                {hasStandardTemplate && (
+                  <seedFetcher.Form method="post">
+                    <input type="hidden" name="intent" value="seedStandardCategories" />
+                    <input type="hidden" name="source" value={source} />
+                    <Button submit loading={seedFetcher.state !== "idle"}>
+                      Seed standard categories
+                    </Button>
+                  </seedFetcher.Form>
+                )}
                 <addFetcher.Form method="post">
                   <input type="hidden" name="intent" value="addDef" />
                   <input type="hidden" name="source" value={source} />
@@ -447,7 +538,7 @@ export default function CollectionsTab() {
         {vendorTags.length > 0 && (
           <Card>
             <BlockStack gap="300">
-              <Text as="h2" variant="headingMd">{`Existing Shopify tags for ${VENDOR_NAMES[source]}`}</Text>
+              <Text as="h2" variant="headingMd">{`Existing Shopify tags for ${brandLabel(source)}`}</Text>
               <Text as="p" tone="subdued">
                 Reference for writing tag rules above — every tag already
                 in use on this vendor's products in your store, most-used
