@@ -24,10 +24,6 @@ function tagsFromCategories(categories) {
   return tags;
 }
 
-function stripHtml(html) {
-  return (html || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-}
-
 // OZZ's WooCommerce content stores some punctuation as literal HTML
 // entities (e.g. the inch/double-prime mark as "&#8243;" rather than the
 // real ″ character) instead of the actual Unicode character — confirmed
@@ -50,6 +46,49 @@ function decodeHtmlEntities(str) {
     .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
     .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
     .replace(/&([a-zA-Z]+);/g, (m, name) => (name in NAMED_ENTITIES ? NAMED_ENTITIES[name] : m));
+}
+
+function escapeHtml(str) {
+  return (str || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// WooCommerce's Store API splits a product's real content across THREE
+// separate fields, and the previous version of this adapter only ever
+// read one of them (whichever of description/short_description happened
+// to be non-empty) — confirmed empirically against OZZ's real API
+// response (via a fresh fetch, not assumed) that this was silently
+// dropping most of the actual product copy:
+//   - short_description: the short prose paragraphs (fitment, material,
+//     install notes) — often the ONLY place with real descriptive text.
+//   - description: a block-editor section (Key Features / Related
+//     documents / contact CTA) — can be non-empty even when it has none
+//     of the actual descriptive prose, which is what made the `||`
+//     fallback wrong: a non-empty `description` was masking a real,
+//     non-empty `short_description` sitting right next to it.
+//   - attributes: product-level spec data (voltage, IP rating, weight,
+//     EAN code, etc.) — not prose at all, and wasn't being read anywhere
+//     before this; confirmed shape is [{ name, terms: [{ name }] }]
+//     (terms holds the value(s), not a plain "value" field).
+// All three are concatenated here so nothing is silently dropped,
+// regardless of which fields a given product happens to populate.
+function specsTableHtml(attributes) {
+  if (!Array.isArray(attributes) || attributes.length === 0) return "";
+  const rows = attributes
+    .map((a) => {
+      const label = (a?.name || "").trim();
+      // Seen in the real data: placeholder "-" values and values with a
+      // literal newline in them (e.g. a lumen/wattage pair) — joined with
+      // ", " and placeholder-only entries skipped rather than shown as
+      // a meaningless "-" row.
+      const value = (a?.terms || [])
+        .map((t) => (t?.name || "").replace(/\n+/g, ", ").trim())
+        .filter((v) => v && v !== "-")
+        .join(", ");
+      return label && value ? `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(value)}</td></tr>` : null;
+    })
+    .filter(Boolean);
+  if (rows.length === 0) return "";
+  return `<table><tbody>${rows.join("")}</tbody></table>`;
 }
 
 export function mapOzzProduct(product, variations, titlePrefix) {
@@ -82,11 +121,17 @@ export function mapOzzProduct(product, variations, titlePrefix) {
 
   const decodedName = decodeHtmlEntities(product.name);
 
+  const descriptionParts = [
+    decodeHtmlEntities(product.short_description),
+    decodeHtmlEntities(product.description),
+    specsTableHtml(product.attributes),
+  ].filter((part) => part && part.trim());
+
   return {
     sourceUrl: product.permalink,
     sku: product.sku || first?.sku || null,
     title: titlePrefix ? formatProductTitle(titlePrefix, decodedName) : decodedName,
-    descriptionHtml: decodeHtmlEntities(product.description) || stripHtml(decodeHtmlEntities(product.short_description)) || "",
+    descriptionHtml: descriptionParts.join("\n"),
     images,
     variantsJson: { optionNames: isGrouped ? ["Option"] : [], variants },
     tags: tagsFromCategories(product.categories),
