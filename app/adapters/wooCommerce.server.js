@@ -93,8 +93,23 @@ async function fetchJsonViaUnlocker(url) {
 
 async function fetchJsonFrom(baseUrl, path) {
   const url = `${baseUrl}${path}`;
-  const res = await fetch(url, { headers: BROWSER_HEADERS });
-  const text = await res.text();
+  let res;
+  let text;
+  try {
+    res = await fetch(url, { headers: BROWSER_HEADERS });
+    text = await res.text();
+  } catch (err) {
+    // 2026-11-07, round 2: the connection itself is now being reset
+    // ("socket hang up"/ECONNRESET) before any response at all comes
+    // back — a step up from the 200-with-HTML-challenge seen earlier the
+    // same day, but the same underlying network/IP-level block, just
+    // enforced harder. There's no response to inspect here, so go
+    // straight to the Web Unlocker rather than letting this throw
+    // uncaught the way it did before this fix.
+    const data = await fetchJsonViaUnlocker(url);
+    await sleep(REQUEST_DELAY_MS);
+    return data;
+  }
 
   if (res.ok) {
     try {
