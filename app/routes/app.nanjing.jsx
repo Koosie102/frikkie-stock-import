@@ -12,6 +12,12 @@ import {
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { parseNanjingPdf } from "../adapters/nanjingPdf.server";
+import {
+  parseNanjingCatalog,
+  matchCatalogEntry,
+  groupByBaseFamily,
+  catalogEntryToDescriptionHtml,
+} from "../adapters/nanjingCatalog.server";
 import { pushStagedProduct, getPushChannelInfo } from "../adapters/shopifyPush.server";
 import { bulkSyncPrices } from "../adapters/bulkPriceSync.server";
 import { matchSkusToShopify, syncVariantPrice, fetchVendorProducts, fuzzyMatchTitles, checkProductsExist } from "../adapters/shopifyMatch.server";
@@ -77,8 +83,57 @@ export const action = async ({ request }) => {
   // every other source's route — branch on content-type rather than
   // trying to parse every request the same way.
   if (contentType.includes("multipart/form-data")) {
-    const uploadHandler = unstable_createMemoryUploadHandler({ maxPartSize: 30 * 1024 * 1024 });
+    const uploadHandler = unstable_createMemoryUploadHandler({ maxPartSize: 60 * 1024 * 1024 });
     const formData = await unstable_parseMultipartFormData(request, uploadHandler);
+
+    // The product catalog is a separate, much larger PDF (98 pages of
+    // supplier spec sheets, not pricing) — handled as its own upload/
+    // merge step rather than folding it into the pricelist branch below,
+    // since it doesn't create or price any staged rows, only enriches
+    // descriptions on rows the pricelist upload already created.
+    const catalogFile = formData.get("catalog");
+    if (catalogFile && typeof catalogFile !== "string") {
+      let entries;
+      try {
+        const arrayBuffer = await catalogFile.arrayBuffer();
+        entries = await parseNanjingCatalog(Buffer.from(arrayBuffer));
+      } catch (err) {
+        console.error("Nanjing catalog parse failed:", err);
+        return { ok: false, mode: "uploadCatalog", error: `Couldn't read that catalog PDF: ${String(err.message || err)}` };
+      }
+      if (entries.length === 0) {
+        return { ok: false, mode: "uploadCatalog", error: "No product entries could be read from that catalog PDF — is it the right file?" };
+      }
+
+      const baseFamilyMap = groupByBaseFamily(entries);
+      const staged = await db.stagedProduct.findMany({
+        where: { source: "NANJING", sku: { not: null } },
+        select: { id: true, sku: true, title: true },
+      });
+
+      let exact = 0, approx = 0;
+      for (const p of staged) {
+        const match = matchCatalogEntry(p.sku, p.title, baseFamilyMap);
+        if (!match) continue;
+        await db.stagedProduct.update({
+          where: { id: p.id },
+          data: { descriptionHtml: catalogEntryToDescriptionHtml(match.entry) },
+        });
+        if (match.confidence === "exact") exact += 1;
+        else approx += 1;
+      }
+
+      return {
+        ok: true,
+        mode: "uploadCatalog",
+        catalogEntries: entries.length,
+        checked: staged.length,
+        exact,
+        approx,
+        unmatched: staged.length - exact - approx,
+      };
+    }
+
     const file = formData.get("pricelist");
 
     if (!file || typeof file === "string") {
@@ -241,6 +296,39 @@ export const action = async ({ request }) => {
       });
     }
     return { ok: true, mode: "syncWithShopify", checked: pushedItems.length, reset: missing.length };
+  }
+
+  // The pricelist parser's row-identity formula (what makes a sourceUrl,
+  // which decides whether a re-upload updates an existing row or creates
+  // a new one) changed twice as parsing bugs got fixed — so a pricelist
+  // re-uploaded after one of those fixes landed no longer matches the
+  // rows an earlier upload created under the old formula, and both sets
+  // pile up side by side instead of the old one being replaced. Every
+  // upload stamps the ImportRun it belongs to onto every row it
+  // touches (new or updated), so "not part of the most recent run" is
+  // exactly what a leftover from an old formula looks like — cleared
+  // here rather than silently left to double-count "total staged" and
+  // get enriched twice by the catalog upload above. PUSHED rows are
+  // never auto-deleted (deleting one would orphan a live Shopify
+  // listing's link); they're reported instead so you can look at them.
+  if (intent === "removeDuplicates") {
+    const latestRun = await db.importRun.findFirst({
+      where: { source: "NANJING" },
+      orderBy: { startedAt: "desc" },
+    });
+    if (!latestRun) {
+      return { ok: false, mode: "removeDuplicates", error: "No pricelist upload found yet — upload one first." };
+    }
+    const stale = await db.stagedProduct.findMany({
+      where: { source: "NANJING", runId: { not: latestRun.id } },
+      select: { id: true, status: true },
+    });
+    const deletable = stale.filter((p) => p.status !== "PUSHED");
+    const pushedStale = stale.length - deletable.length;
+    if (deletable.length > 0) {
+      await db.stagedProduct.deleteMany({ where: { id: { in: deletable.map((p) => p.id) } } });
+    }
+    return { ok: true, mode: "removeDuplicates", removed: deletable.length, pushedStale };
   }
 
   async function performPush(stagedList, channelInfo, forceNewIds = new Set()) {
@@ -547,6 +635,77 @@ function UploadCard() {
   );
 }
 
+function UploadCatalogCard() {
+  const uploadFetcher = useFetcher();
+  const uploading = uploadFetcher.state !== "idle";
+  const result = uploadFetcher.data;
+  const [file, setFile] = useState(null);
+
+  const handleDrop = (_dropFiles, acceptedFiles) => {
+    const f = acceptedFiles[0];
+    if (f) setFile(f);
+  };
+
+  function handleSubmit() {
+    if (!file) return;
+    const fd = new FormData();
+    fd.set("catalog", file);
+    uploadFetcher.submit(fd, { method: "post", encType: "multipart/form-data" });
+  }
+
+  useEffect(() => {
+    if (uploadFetcher.state === "idle" && uploadFetcher.data?.mode === "uploadCatalog" && uploadFetcher.data.ok) {
+      setFile(null);
+    }
+  }, [uploadFetcher.state, uploadFetcher.data]);
+
+  return (
+    <Card>
+      <BlockStack gap="300">
+        <Text as="h2" variant="headingMd">Upload product catalog (optional)</Text>
+        <Text as="p" tone="subdued">
+          Separate from the pricelist above — Jiuguang's own product
+          catalog PDF has a full spec sheet per model (chip, lumens,
+          voltage, housing, bracket, beam, DRL, certification, ...),
+          richer than the pricelist's thin spec column. Upload it after
+          staging products from the pricelist and any product it can match
+          gets its description replaced with the catalog's own spec text.
+          Matching is by model code, not exact — the catalog's codes often
+          split one pricelist model into several size/"PRO" variants the
+          pricelist itself doesn't distinguish, so a few matches are a
+          best-effort pick of the closest variant rather than a guaranteed
+          exact one (flagged as such below); products with no model code
+          recovered from the pricelist (shown as an "NJ-..." SKU) can't be
+          matched at all and keep their existing description.
+        </Text>
+        {result?.mode === "uploadCatalog" && result.ok === false && <Banner tone="critical" title="Couldn't process that file">{result.error}</Banner>}
+        {result?.mode === "uploadCatalog" && result.ok === true && (
+          <Banner tone="success" title="Catalog matched">
+            {`Read ${result.catalogEntries} catalog entries. Of ${result.checked} staged product(s) with a SKU: ${result.exact} matched exactly, ${result.approx} matched approximately (closest variant), ${result.unmatched} had no match.`}
+          </Banner>
+        )}
+        <DropZone accept="application/pdf" type="file" allowMultiple={false} onDrop={handleDrop}>
+          {file ? (
+            <div style={{ padding: 16 }}>
+              <InlineStack gap="200" blockAlign="center">
+                <Thumbnail size="small" alt="PDF" source="https://cdn.shopify.com/s/files/applications/0e8/4e4/products/file-icon.png" />
+                <Text as="span">{file.name}</Text>
+              </InlineStack>
+            </div>
+          ) : (
+            <DropZone.FileUpload actionTitle="Add catalog PDF" actionHint="or drop a PDF file here" />
+          )}
+        </DropZone>
+        <InlineStack>
+          <Button onClick={handleSubmit} disabled={!file} loading={uploading} variant="primary">
+            {uploading ? "Matching…" : "Match catalog to staged products"}
+          </Button>
+        </InlineStack>
+      </BlockStack>
+    </Card>
+  );
+}
+
 function ConflictResolutionModal({ pushResult, onDismiss }) {
   const resolveFetcher = useFetcher();
   const [choices, setChoices] = useState({});
@@ -629,12 +788,15 @@ export default function NanjingSource() {
   const titleFetcher = useFetcher();
   const syncFetcher = useFetcher();
   const updateAllFetcher = useFetcher();
+  const dedupeFetcher = useFetcher();
   const pushing = pushFetcher.state !== "idle";
   const syncing = syncFetcher.state !== "idle";
   const updatingAll = updateAllFetcher.state !== "idle";
+  const dedupeing = dedupeFetcher.state !== "idle";
   const pushResult = pushFetcher.data;
   const syncResult = syncFetcher.data;
   const updateAllResult = updateAllFetcher.data;
+  const dedupeResult = dedupeFetcher.data;
 
   const [searchInput, setSearchInput] = useState(q);
   useEffect(() => setSearchInput(q), [q]);
@@ -695,6 +857,19 @@ export default function NanjingSource() {
               : `Checked ${syncResult.checked} pushed product(s) — all still exist in Shopify.`}
           </Banner>
         )}
+        {dedupeResult?.mode === "removeDuplicates" && dedupeResult.ok === false && (
+          <Banner tone="critical">{dedupeResult.error}</Banner>
+        )}
+        {dedupeResult?.mode === "removeDuplicates" && dedupeResult.ok === true && (
+          <Banner tone={dedupeResult.removed > 0 ? "success" : "info"} title="Duplicate cleanup">
+            {dedupeResult.removed > 0
+              ? `Removed ${dedupeResult.removed} leftover row(s) from an earlier parsing version of the pricelist.`
+              : "No leftover duplicate rows found."}
+            {dedupeResult.pushedStale > 0
+              ? ` ${dedupeResult.pushedStale} older row(s) look like duplicates too but are already Pushed, so they were left alone — worth a manual look.`
+              : ""}
+          </Banner>
+        )}
         {updateAllResult?.mode === "updateAllPrices" && (
           <Banner tone={updateAllResult.ok ? "success" : "warning"} title="Prices updated">
             <BlockStack gap="100">
@@ -716,6 +891,7 @@ export default function NanjingSource() {
         )}
 
         <UploadCard />
+        <UploadCatalogCard />
 
         <Card>
           <BlockStack gap="300">
@@ -730,6 +906,10 @@ export default function NanjingSource() {
                   <input type="hidden" name="intent" value="updateAllPrices" />
                   <Button submit loading={updatingAll}>Update all prices</Button>
                 </updateAllFetcher.Form>
+                <dedupeFetcher.Form method="post">
+                  <input type="hidden" name="intent" value="removeDuplicates" />
+                  <Button submit loading={dedupeing}>Remove duplicates</Button>
+                </dedupeFetcher.Form>
                 <Button url={`/app/export/NANJING?tab=${tabId}${q ? `&q=${encodeURIComponent(q)}` : ""}`} external>Export CSV</Button>
               </InlineStack>
             </InlineStack>
