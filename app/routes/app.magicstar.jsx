@@ -44,10 +44,11 @@ function imageUrlFor(request, sku) {
 // and same ImportRun/log-tail pattern as STEDI's scraper: ~126 Bright
 // Data requests (6 listing pages + ~120 product pages, see
 // magicstarCatalog.server.js's header comment) takes minutes, not
-// something to block the request on. Uses its own ImportRun source
-// ("MAGICSTAR_CATALOG") distinct from "MAGICSTAR" (the pricelist PDF
-// parse's own ImportRun rows) so the two don't interfere with each
-// other's "latest run" status.
+// something to block the request on. Uses source "MAGICSTAR" (same as
+// the pricelist PDF parse — "MAGICSTAR" is the only valid Source enum
+// value for this tab) with kind "catalog" to distinguish its own
+// ImportRun rows from the pricelist upload's, so the two don't interfere
+// with each other's "latest run" status.
 async function runMagicstarCatalogInBackground(runId) {
   const logLines = [];
   const log = (line) => {
@@ -127,7 +128,7 @@ export const loader = async ({ request }) => {
   }
 
   const latestCatalogRun = await db.importRun.findFirst({
-    where: { source: "MAGICSTAR_CATALOG" },
+    where: { source: "MAGICSTAR", kind: "catalog" },
     orderBy: { startedAt: "desc" },
   });
 
@@ -207,11 +208,11 @@ export const action = async ({ request }) => {
   const intent = formData.get("intent");
 
   if (intent === "fetchCatalog") {
-    const running = await db.importRun.findFirst({ where: { source: "MAGICSTAR_CATALOG", status: "running" } });
+    const running = await db.importRun.findFirst({ where: { source: "MAGICSTAR", kind: "catalog", status: "running" } });
     if (running) {
       return { ok: false, mode: "fetchCatalog", error: "A catalog scrape is already running — check progress below." };
     }
-    const run = await db.importRun.create({ data: { source: "MAGICSTAR_CATALOG", status: "running" } });
+    const run = await db.importRun.create({ data: { source: "MAGICSTAR", kind: "catalog", status: "running" } });
     // Deliberately not awaited — see runMagicstarCatalogInBackground's comment.
     runMagicstarCatalogInBackground(run.id);
     return { ok: true, mode: "fetchCatalog" };

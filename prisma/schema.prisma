@@ -58,6 +58,15 @@ enum ImportStatus {
 model ImportRun {
   id            String   @id @default(cuid())
   source        Source
+  // Distinguishes a run's purpose within the same source, when a source
+  // has more than one kind of background job (e.g. MagicStar's pricelist
+  // upload vs. its separate Alibaba-catalog-enrichment fetch) — null for
+  // every source's original/default run type, so existing rows and every
+  // other source's queries (which never filter on this) are unaffected.
+  // Deliberately NOT a new Source enum value: Source is the shared
+  // supplier identity used by StagedProduct/SourceSettings/CollectionDef
+  // too, and isn't meant to carry sub-job labels.
+  kind          String?
   status        String   @default("running") // running | done | failed
   totalFound    Int      @default(0)
   totalDone     Int      @default(0)
