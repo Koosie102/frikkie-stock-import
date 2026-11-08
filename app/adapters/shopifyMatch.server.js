@@ -142,7 +142,10 @@ const VENDOR_PRODUCTS_QUERY = `#graphql
   }
 `;
 
-function normalizeWords(title) {
+// Exported too — magicstarCatalog.server.js reuses this same word-overlap
+// scoring to match Alibaba catalog listings to staged products by title,
+// rather than re-implementing its own similarity function.
+export function normalizeWords(title) {
   return new Set(
     (title || "")
       .toLowerCase()
@@ -152,7 +155,7 @@ function normalizeWords(title) {
   );
 }
 
-function jaccardSimilarity(a, b) {
+export function jaccardSimilarity(a, b) {
   const setA = normalizeWords(a);
   const setB = normalizeWords(b);
   if (setA.size === 0 || setB.size === 0) return 0;

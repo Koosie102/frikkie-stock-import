@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useLoaderData, useFetcher, useSearchParams } from "@remix-run/react";
+import { useLoaderData, useFetcher, useSearchParams, useRevalidator } from "@remix-run/react";
 import {
   unstable_parseMultipartFormData,
   unstable_createMemoryUploadHandler,
@@ -7,14 +7,18 @@ import {
 import {
   Page, Card, BlockStack, InlineStack, Text, Button, Banner,
   IndexTable, useIndexResourceState, Badge, TextField, Tabs, Link, Modal,
-  DropZone, Thumbnail,
+  DropZone, Thumbnail, ProgressBar,
 } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { parseMagicstarPdf } from "../adapters/magicstarPdf.server";
+import { fetchMagicstarCatalog, matchMagicstarEntry } from "../adapters/magicstarCatalog.server";
 import { pushStagedProduct, getPushChannelInfo } from "../adapters/shopifyPush.server";
 import { bulkSyncPrices } from "../adapters/bulkPriceSync.server";
-import { matchSkusToShopify, syncVariantPrice, fetchVendorProducts, fuzzyMatchTitles, checkProductsExist } from "../adapters/shopifyMatch.server";
+import {
+  matchSkusToShopify, syncVariantPrice, fetchVendorProducts, fuzzyMatchTitles, checkProductsExist,
+  jaccardSimilarity, normalizeWords,
+} from "../adapters/shopifyMatch.server";
 import { VENDOR_NAMES } from "../utils/vendorNames";
 import { generateTags } from "../utils/tagGenerator";
 import { productIdToAdminPath } from "../utils/shopify";
@@ -34,6 +38,66 @@ const SORT_FIELDS = ["title", "sku", null, "costZar", "retailZar", null, null];
 function imageUrlFor(request, sku) {
   const appUrl = process.env.SHOPIFY_APP_URL || new URL(request.url).origin;
   return `${appUrl}/files/magicstar/${encodeURIComponent(sku)}`;
+}
+
+// Runs the Alibaba catalog scrape + match in the background, same reason
+// and same ImportRun/log-tail pattern as STEDI's scraper: ~126 Bright
+// Data requests (6 listing pages + ~120 product pages, see
+// magicstarCatalog.server.js's header comment) takes minutes, not
+// something to block the request on. Uses its own ImportRun source
+// ("MAGICSTAR_CATALOG") distinct from "MAGICSTAR" (the pricelist PDF
+// parse's own ImportRun rows) so the two don't interfere with each
+// other's "latest run" status.
+async function runMagicstarCatalogInBackground(runId) {
+  const logLines = [];
+  const log = (line) => {
+    const stamp = new Date().toISOString().slice(11, 19);
+    logLines.push(`[${stamp}] ${line}`);
+    if (logLines.length > 150) logLines.shift();
+  };
+  const flush = async (extra = {}) => {
+    await db.importRun.update({ where: { id: runId }, data: { logTail: logLines.join("\n"), ...extra } }).catch(() => {});
+  };
+
+  try {
+    log("Starting MagicStar catalog scrape.");
+    await flush({ statusMessage: "Listing products…" });
+
+    const entries = await fetchMagicstarCatalog(async (progress) => {
+      if (progress.phase === "listing") {
+        log(`Listing page ${progress.page} — ${progress.totalSoFar} product(s) found so far.`);
+        await flush({ statusMessage: `Listing products: page ${progress.page} (${progress.totalSoFar} found so far)` });
+      } else {
+        log(`[${progress.index}/${progress.total}] Fetched: ${progress.title}`);
+        await flush({ totalFound: progress.total, totalDone: progress.index, statusMessage: `Fetching product pages: ${progress.index}/${progress.total}` });
+      }
+    });
+
+    const failed = entries.filter((e) => e.error).length;
+    log(`Catalog fetch done — ${entries.length} product(s) read (${failed} failed to fetch).`);
+    await flush({ statusMessage: `Matching ${entries.length} catalog entries to staged products…` });
+
+    const staged = await db.stagedProduct.findMany({ where: { source: "MAGICSTAR" }, select: { id: true, title: true } });
+    let exact = 0, approx = 0;
+    for (const p of staged) {
+      const match = matchMagicstarEntry(p.title, entries, jaccardSimilarity, normalizeWords);
+      if (!match) continue;
+      await db.stagedProduct.update({ where: { id: p.id }, data: { descriptionHtml: match.entry.descriptionHtml } });
+      log(`Matched (${match.confidence}, staged "${p.title}") -> "${match.entry.title}"`);
+      if (match.confidence === "exact") exact += 1; else approx += 1;
+    }
+
+    log("Catalog match complete.");
+    await flush({
+      status: "done",
+      statusMessage: `Done — ${entries.length} catalog entries read, ${failed} failed. Of ${staged.length} staged product(s): ${exact} matched confidently, ${approx} matched approximately, ${staged.length - exact - approx} had no good match.`,
+      finishedAt: new Date(),
+    });
+  } catch (err) {
+    log(`Scrape failed: ${err.message || err}`);
+    console.error("MagicStar catalog scrape failed:", err);
+    await flush({ status: "failed", statusMessage: "Failed — see error below.", errorLog: String(err.message || err), finishedAt: new Date() });
+  }
 }
 
 export const loader = async ({ request }) => {
@@ -62,9 +126,15 @@ export const loader = async ({ request }) => {
     fuzzyMatches = fuzzyMatchTitles(unmatched.map((p) => ({ id: p.id, title: p.title })), vendorProducts);
   }
 
+  const latestCatalogRun = await db.importRun.findFirst({
+    where: { source: "MAGICSTAR_CATALOG" },
+    orderBy: { startedAt: "desc" },
+  });
+
   return {
     staged, pushedCount, totalCount, tabId, q, sortField, sortDir,
     shopDomain: session.shop, shopifyMatches, fuzzyMatches, settings,
+    latestCatalogRun,
   };
 };
 
@@ -135,6 +205,17 @@ export const action = async ({ request }) => {
 
   const formData = await request.formData();
   const intent = formData.get("intent");
+
+  if (intent === "fetchCatalog") {
+    const running = await db.importRun.findFirst({ where: { source: "MAGICSTAR_CATALOG", status: "running" } });
+    if (running) {
+      return { ok: false, mode: "fetchCatalog", error: "A catalog scrape is already running — check progress below." };
+    }
+    const run = await db.importRun.create({ data: { source: "MAGICSTAR_CATALOG", status: "running" } });
+    // Deliberately not awaited — see runMagicstarCatalogInBackground's comment.
+    runMagicstarCatalogInBackground(run.id);
+    return { ok: true, mode: "fetchCatalog" };
+  }
 
   if (intent === "acceptMatch") {
     const id = formData.get("id");
@@ -537,6 +618,76 @@ function UploadCard() {
   );
 }
 
+function CatalogCard({ run }) {
+  const fetchFetcher = useFetcher();
+  const fetching = fetchFetcher.state !== "idle";
+  const result = fetchFetcher.data;
+  const revalidator = useRevalidator();
+  const running = run?.status === "running";
+
+  useEffect(() => {
+    if (!running) return;
+    const interval = setInterval(() => {
+      if (revalidator.state === "idle") revalidator.revalidate();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [running, revalidator]);
+
+  return (
+    <Card>
+      <BlockStack gap="300">
+        <InlineStack align="space-between">
+          <Text as="h2" variant="headingMd">Enrich from Alibaba catalog (optional)</Text>
+          {run?.status === "running" && <Badge tone="info">Running</Badge>}
+          {run?.status === "done" && <Badge tone="success">Done</Badge>}
+          {run?.status === "failed" && <Badge tone="critical">Failed</Badge>}
+        </InlineStack>
+        <Text as="p" tone="subdued">
+          MagicStar's own Alibaba storefront has richer per-product specs
+          and vehicle fitment than the pricelist PDF — but unlike Nanjing's
+          catalog, Alibaba has no model number on any listing, so matching
+          is by title + vehicle fitment similarity only, which is
+          genuinely less reliable (a product may be matched approximately,
+          or not matched at all, and this hasn't been run against your
+          real staged products before, so treat the first run as a trial
+          — check a few results before trusting it broadly). This is also
+          slower than other sources: it has to fetch every one of their
+          ~120 product pages individually (Alibaba needs real browser
+          rendering to show content at all, via the same Bright Data
+          service used for STEDI/OZZ), so expect several minutes and some
+          Bright Data usage per run.
+        </Text>
+        {result?.mode === "fetchCatalog" && result.ok === false && <Banner tone="critical">{result.error}</Banner>}
+        {running && (
+          <BlockStack gap="200">
+            <Text as="p" tone="subdued">
+              {run.statusMessage || "Starting…"}
+              {" — this runs in the background, feel free to leave this tab and come back."}
+            </Text>
+            {run.totalFound > 0 && <ProgressBar progress={Math.round((run.totalDone / run.totalFound) * 100)} size="small" />}
+          </BlockStack>
+        )}
+        {run?.status === "done" && run.statusMessage && <Text as="p" tone="subdued">{run.statusMessage}</Text>}
+        {run?.status === "failed" && <Banner tone="critical">{run.errorLog || "Unknown error."}</Banner>}
+        {run?.logTail && (
+          <details>
+            <summary style={{ cursor: "pointer", color: "var(--p-color-text-link, #2c6ecb)" }}>View log</summary>
+            <div style={{ marginTop: 8, maxHeight: 320, overflowY: "auto", background: "#1a1a1a", color: "#e0e0e0", padding: 12, borderRadius: 6, fontFamily: "monospace", fontSize: 12, whiteSpace: "pre-wrap" }}>
+              {run.logTail}
+            </div>
+          </details>
+        )}
+        <fetchFetcher.Form method="post">
+          <input type="hidden" name="intent" value="fetchCatalog" />
+          <Button submit loading={fetching || running} disabled={fetching || running}>
+            {running ? "Running…" : "Fetch & match Alibaba catalog"}
+          </Button>
+        </fetchFetcher.Form>
+      </BlockStack>
+    </Card>
+  );
+}
+
 function ConflictResolutionModal({ pushResult, onDismiss }) {
   const resolveFetcher = useFetcher();
   const [choices, setChoices] = useState({});
@@ -611,7 +762,7 @@ function ConflictResolutionModal({ pushResult, onDismiss }) {
 export default function MagicstarSource() {
   const {
     staged, pushedCount, totalCount, tabId, q, sortField, sortDir,
-    shopDomain, shopifyMatches, fuzzyMatches, settings,
+    shopDomain, shopifyMatches, fuzzyMatches, settings, latestCatalogRun,
   } = useLoaderData();
   const [searchParams, setSearchParams] = useSearchParams();
   const pushFetcher = useFetcher();
@@ -703,6 +854,7 @@ export default function MagicstarSource() {
         )}
 
         <UploadCard />
+        <CatalogCard run={latestCatalogRun} />
 
         <Card>
           <BlockStack gap="300">
