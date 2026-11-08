@@ -124,7 +124,7 @@ export const action = async ({ request }) => {
         sourceUrl: row.sourceUrl,
         sku: row.sku,
         title: row.title,
-        descriptionHtml: "",
+        descriptionHtml: row.descriptionHtml || "",
         images: [imageUrlFor(request, row.imageKey)],
         tags: generateTags(row.title, {}),
         variantsJson: { optionNames: [], variants: [{ sku: row.sku, priceForeign: row.priceUSD, retailZar, costZar }] },

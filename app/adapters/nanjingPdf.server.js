@@ -14,13 +14,16 @@
 //
 //  - MagicStar: one borderless row per product, one real photo per row,
 //    reconstructed purely from text/image Y-position bands.
-//  - Nanjing: real printed table headers ("Model No. | Specifications |
-//    Size | ... | Picture | Unit | Price"), a table routinely spans
-//    several PAGES with the header only printed once at the top (handled
-//    below by carrying the last-seen column layout across pages until a
-//    new header appears), and many products are printed as ONE merged
-//    block (one Model No., one spec paragraph, one photo) covering
-//    SEVERAL price rows underneath it — e.g. a light bar sold in 5
+//  - Nanjing: real printed table headers (most commonly "Model No. |
+//    Specifications | Size | Wiring Harness | Covers | Picture | Unit |
+//    Price", but several pages use a different column set entirely — e.g.
+//    "Model No. | Specifications | Size | LED Chips | Quantity | Pattern |
+//    Picture | Unit | Price" for the whip-light/UTV section), a table
+//    routinely spans several PAGES with the header only printed once at the
+//    top (handled below by carrying the last-seen column layout across
+//    pages until a new header appears), and many products are printed as
+//    ONE merged block (one Model No., one spec paragraph, one photo)
+//    covering SEVERAL price rows underneath it — e.g. a light bar sold in 5
 //    lengths, each its own price. Per Coenraad, each size/price variant
 //    becomes its own staged row sharing the parent's photo (same pattern
 //    MagicStar already uses for colour variants that repeat a SKU), not
@@ -35,22 +38,65 @@
 // it — including on later pages with no header of their own — until the
 // next header. Row grouping uses two levels:
 //   1. GROUP band — the vertical span of one product's photo (or stack of
-//      photos) in the Picture column. Model No. and Specifications are
-//      captured once per group, from anywhere in that whole span, since
-//      they're only printed once even when several price rows share them.
+//      photos) in the Picture column. Specifications are captured once per
+//      group, from anywhere in that whole span, since they're only printed
+//      once even when several price rows share them.
 //   2. ROW anchor — each "$..." price found inside a group's span is one
 //      output row; a narrow sub-band around that price (vs the next price
-//      above/below it) pulls that row's own Size/Watt/Qty/Pattern value.
+//      above/below it) pulls that row's own cell values. Model No. and
+//      Size are read from this narrow row band FIRST (some layouts, like a
+//      light bar's length variants, print a distinct value per price row)
+//      and only fall back to the whole group's text when the row itself
+//      has nothing of its own (the far more common case — most blocks
+//      print Model No./Size once at the top and leave every row below it
+//      blank in those columns).
+//
+// 2026-11-08, per Coenraad — two real bugs fixed and the title/SKU scheme
+// simplified:
+//  1. SKU is column 1 (Model No.) and ONLY column 1. The old code fell
+//     back to pulling a token out of the Specifications column whenever
+//     Model No. came up empty for a row — that's how products with no
+//     printed model number at all (a real gap in this PDF, not a parsing
+//     bug) ended up with something like "IP68" as their SKU, lifted out of
+//     a "Waterproof rate: IP68" spec line. There is no good fallback for a
+//     row the PDF genuinely never labelled, so one is no longer invented
+//     from unrelated text — it falls back to a synthetic internal id
+//     instead (same shape as the existing no-model imageKey fallback).
+//  2. Specifications (column 2), Wiring Harness, Covers, and whatever
+//     other columns a given layout prints (LED Chips/Quantity/Pattern on
+//     the alternate whip-light/UTV table) now actually reach the staged
+//     product's description — previously this adapter always staged an
+//     empty descriptionHtml, so all of that real product detail was read
+//     out of the PDF and then silently thrown away.
+//  3. Title simplified to a fixed, short shape: "<WOEST Kudu|WOEST Veldt>
+//     <series code> <size> <type> <Pair|Single>" — e.g. "WOEST Kudu X3 5"
+//     Driving Light Pair". The old title strung together the full raw
+//     sub-heading text plus every other column's value, which produced
+//     long, cluttered titles. The PDF's own sub-headings are themselves
+//     inconsistent free text ("3 inch/5 inch Side Shooter Series", "3
+//     inch/ 5 inch Baja Style DRL Pods Light", ...), so rather than using
+//     them verbatim, each DISTINCT sub-heading first seen while walking
+//     the document gets its own short code — X1, X2, X3, ... in the order
+//     encountered — and that code is what lands in the title. "Type" is a
+//     best-effort classification (Driving Light / Light Bar / Work Light /
+//     Whip Light / Motorcycle Light / UTV Light / Accessory, falling back
+//     to the generic "Light") read off the same banners used for the
+//     Kudu/Veldt split. Like every other best-effort piece of this parser,
+//     a wrong series code or type is a quick manual edit at review time,
+//     not a blocker — the raw banner text and full spec paragraph are
+//     still preserved verbatim in the description, nothing is lost, only
+//     kept out of the title.
 //
 // Section banners (the full-width coloured bands like "3-5inch Led Driving
 // Lights", "LED Light Bar", "Universal Roll Bar Mount LED work Light") are
 // read from their own filled rects and tracked as running state while
 // walking the document top to bottom, page to page — but only a banner
 // that clearly names a category (see KUDU_RE/VELDT_RE below) changes the
-// current category; a plain sub-heading like "3 inch/5 inch Side Shooter
-// Series" updates the descriptive text used in the title but leaves the
-// Kudu/Veldt classification as it was. Per Coenraad: anything under a
-// banner mentioning "driving", "spot" or "light bar" is WOEST Kudu;
+// current Kudu/Veldt classification; a plain sub-heading like "3 inch/5
+// inch Side Shooter Series" still earns its own series code and (if it
+// matches one of the type rules) can update the running type label, but
+// leaves the Kudu/Veldt classification as it was. Per Coenraad: anything
+// under a banner mentioning "driving", "spot" or "light bar" is WOEST Kudu;
 // everything else (grill lights, motorcycle lights, whip lights, rock
 // lights, mirror lights, turn signal kits, chase lights, UTV pod lights/
 // accessories, work lights, ...) is WOEST Veldt. This is a best-effort
@@ -80,6 +126,28 @@ const TITLE_PREFIX_VELDT = "WOEST Veldt";
 // "UTV PODS LIGHTS" section (page 20) is the Veldt-side accessory.
 const VELDT_RE = /work\s*light|whip|rock\s*light|mirror|turn\s*signal|chase\s*light|utv\s*pods?\s*light|accessor|grill|motorcycle|roll\s*bar/i;
 const KUDU_RE = /driving|spot|light\s*bar|led\s*bar/i;
+
+// Best-effort product-type label, read off the same banner text as the
+// Kudu/Veldt split above — checked in order, first match wins, and (like
+// currentCategory) a banner that matches nothing leaves the running type
+// label as it was rather than clearing it. Order matters: "Universal Roll
+// Bar Mount LED work Light" must hit the Work Light rule before a generic
+// "mount"/"bracket" rule would otherwise claim it as a plain Accessory.
+const TYPE_RULES = [
+  [/light\s*bar|led\s*bar/i, "Light Bar"],
+  [/whip/i, "Whip Light"],
+  [/utv\s*pods?\s*light/i, "UTV Light"],
+  [/work\s*light/i, "Work Light"],
+  [/motorcycle/i, "Motorcycle Light"],
+  [/remote\s*control|control\s*box|\baccessor/i, "Accessory"],
+  [/driving|pods?\s*light|spot/i, "Driving Light"],
+];
+function classifyProductType(text) {
+  for (const [re, label] of TYPE_RULES) {
+    if (re.test(text)) return label;
+  }
+  return null;
+}
 
 const PAGE_TOP = 10000;
 const PAGE_BOTTOM = -10000;
@@ -141,15 +209,38 @@ function cleanText(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
 
+function escapeHtml(s) {
+  return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 // Best-effort SKU/model-number token: alphanumeric with hyphens/slashes/
-// plusses, at least one digit, 2-20 chars. Looked for anywhere in a
-// group's Model No. column text (not always present — some product
-// blocks print no model number at all).
+// plusses, at least one digit, 2-20 chars. Looked for in the Model No.
+// column's own text only (never in Specifications — see the 2026-11-08
+// note above for why that fallback was removed).
 function extractModelNo(text) {
   const m = (text || "").match(/\b[A-Za-z][A-Za-z0-9]*(?:[-+/][A-Za-z0-9]+)*\b/g);
   if (!m) return null;
   const candidate = m.find((tok) => /\d/.test(tok) && tok.length >= 3 && tok.length <= 24);
   return candidate || null;
+}
+
+// Pulls a plain "<number>"" size out of whatever text a Size cell holds
+// ("3inch Included" -> 3", "Size:4.5\"" -> 4.5"). Returns "" (not a guess)
+// when no clean measurement is present, rather than forcing a wrong value
+// into the title.
+function normalizeSize(text) {
+  const m = (text || "").match(/(\d+(?:\.\d+)?)\s*(?:["'‘’“”″]|in\b|inch(?:es)?\b)/i);
+  return m ? `${m[1]}"` : "";
+}
+
+// Normalizes the Unit column (SET/PAIR/PCS/PC/..., inconsistent case) down
+// to the two words Coenraad wants in the title. Anything that isn't
+// clearly one or the other is left out of the title rather than guessed.
+function normalizeUnit(text) {
+  const t = (text || "").trim().toLowerCase();
+  if (/^(set|pair|pr)s?$/.test(t)) return "Pair";
+  if (/^(pcs?|pc|ea|each)$/.test(t)) return "Single";
+  return "";
 }
 
 function slugify(s) {
@@ -188,16 +279,30 @@ function colsFromHeaderBand(items, hy) {
 }
 
 // Processes one contiguous table region (within a single page) using a
-// fixed column map, mutating `state` (running banner/category, the
-// de-dupe set, and the output rows array) as it goes.
+// fixed column map, mutating `state` (running banner/category/series/type,
+// the de-dupe sets, and the output rows array) as it goes.
 function processRegion(state, { items, images, bannerQueue, cols, yTop, yBottom }) {
   const priceColIdx = cols.findIndex((c) => /price/i.test(c.label));
   const pictureColIdx = cols.findIndex((c) => /picture/i.test(c.label));
   const modelColIdx = cols.findIndex((c) => /model/i.test(c.label));
   const specColIdx = cols.findIndex((c) => /spec/i.test(c.label));
+  const sizeColIdx = cols.findIndex((c) => /size/i.test(c.label));
+  const unitColIdx = cols.findIndex((c) => /^unit$/i.test(c.label));
   if (priceColIdx < 0 || pictureColIdx < 0) return;
   const priceCol = cols[priceColIdx];
   const pictureCol = cols[pictureColIdx];
+
+  const cellText = (colIdx, top, bottom) => {
+    if (colIdx < 0) return "";
+    const col = cols[colIdx];
+    return cleanText(
+      items
+        .filter((it) => it.x >= col.x0 && it.x < col.x1 && it.y <= top && it.y > bottom)
+        .sort((a, b) => b.y - a.y || a.x - b.x)
+        .map((it) => it.str)
+        .join(" "),
+    );
+  };
 
   // bannerQueue is one shared, page-level queue (sorted top to bottom)
   // passed in by the caller and consumed here as we walk down through
@@ -239,18 +344,20 @@ function processRegion(state, { items, images, bannerQueue, cols, yTop, yBottom 
       state.currentSection = b.text;
       if (VELDT_RE.test(b.text)) state.currentCategory = "VELDT";
       else if (KUDU_RE.test(b.text)) state.currentCategory = "KUDU";
-      // else: a non-category sub-label — updates currentSection (used in
-      // the title) but leaves currentCategory as it was.
+      const type = classifyProductType(b.text);
+      if (type) state.currentTypeLabel = type;
     }
+    if (!state.seriesCodes.has(state.currentSection)) {
+      state.seriesCodes.set(state.currentSection, `X${state.seriesCodes.size + 1}`);
+    }
+    const seriesCode = state.seriesCodes.get(state.currentSection);
     const category = state.currentCategory;
     const titlePrefix = category === "KUDU" ? TITLE_PREFIX_KUDU : TITLE_PREFIX_VELDT;
+    const typeLabel = state.currentTypeLabel;
 
-    const inGroup = (col) =>
-      items.filter((it) => it.x >= col.x0 && it.x < col.x1 && it.y <= group.spanTop && it.y > group.spanBottom);
-
-    const modelText = modelColIdx >= 0 ? cleanText(inGroup(cols[modelColIdx]).sort((a, b) => b.y - a.y || a.x - b.x).map((it) => it.str).join(" ")) : "";
-    const specText = specColIdx >= 0 ? cleanText(inGroup(cols[specColIdx]).sort((a, b) => b.y - a.y || a.x - b.x).map((it) => it.str).join(" ")) : "";
-    const modelNo = extractModelNo(modelText) || extractModelNo(specText);
+    const groupModelText = cellText(modelColIdx, group.spanTop, group.spanBottom);
+    const specText = cellText(specColIdx, group.spanTop, group.spanBottom);
+    const groupSizeText = cellText(sizeColIdx, group.spanTop, group.spanBottom);
 
     const priceItems = items
       .filter((it) => it.x >= priceCol.x0 && it.x < priceCol.x1 && it.y <= group.spanTop && it.y > group.spanBottom && /\$\s*[\d,.]+/.test(it.str))
@@ -258,7 +365,8 @@ function processRegion(state, { items, images, bannerQueue, cols, yTop, yBottom 
     if (!priceItems.length) continue;
 
     const bestImage = group.images.slice().sort((a, b) => (b.x1 - b.x0) * (b.y1 - b.y0) - (a.x1 - a.x0) * (a.y1 - a.y0))[0];
-    const imageKey = modelNo ? `nj-${slugify(modelNo)}` : `nj-y${Math.round(group.y1)}-${state.rows.length}`;
+    const provisionalModelNo = extractModelNo(groupModelText);
+    const imageKey = provisionalModelNo ? `nj-${slugify(provisionalModelNo)}` : `nj-y${Math.round(group.y1)}-${state.rows.length}`;
 
     for (let pi = 0; pi < priceItems.length; pi++) {
       const priceItem = priceItems[pi];
@@ -269,37 +377,72 @@ function processRegion(state, { items, images, bannerQueue, cols, yTop, yBottom 
       const rowYTop = pi === 0 ? group.spanTop : (priceItem.y + priceItems[pi - 1].y) / 2;
       const rowYBottom = pi + 1 < priceItems.length ? (priceItem.y + priceItems[pi + 1].y) / 2 : group.spanBottom;
 
-      const variantParts = [];
+      // Model No. and Size are usually shared from the top of the group
+      // (the common case — one product, several price rows underneath),
+      // but some layouts (light-bar length variants especially) print a
+      // distinct value on each individual price row instead. Try the
+      // row's own narrow band first; only fall back to the group-wide
+      // text when the row itself has nothing of its own.
+      const rowModelText = cellText(modelColIdx, rowYTop, rowYBottom) || groupModelText;
+      const modelNo = extractModelNo(rowModelText);
+      const rowSizeText = cellText(sizeColIdx, rowYTop, rowYBottom) || groupSizeText;
+      const sizeLabel = normalizeSize(rowSizeText);
+      const unitText = cellText(unitColIdx, rowYTop, rowYBottom);
+      const unitLabel = normalizeUnit(unitText);
+
+      // Every other column this layout happens to have (Wiring Harness /
+      // Covers on the main table, LED Chips / Quantity / Pattern on the
+      // whip-light/UTV table, ...) is real product detail that used to be
+      // crammed into the title — now it goes into the description instead,
+      // one labeled line per non-empty column.
+      const extraLines = [];
       for (let ci = 0; ci < cols.length; ci++) {
-        if (ci === priceColIdx || ci === pictureColIdx || ci === modelColIdx || ci === specColIdx) continue;
-        if (/^unit$/i.test(cols[ci].label)) continue;
-        const cellItems = items
-          .filter((it) => it.x >= cols[ci].x0 && it.x < cols[ci].x1 && it.y <= rowYTop && it.y > rowYBottom)
-          .sort((a, b) => b.y - a.y || a.x - b.x);
-        const t = cleanText(cellItems.map((it) => it.str).join(" "));
-        if (t) variantParts.push(t);
+        if ([priceColIdx, pictureColIdx, modelColIdx, specColIdx, sizeColIdx, unitColIdx].includes(ci)) continue;
+        const t = cellText(ci, rowYTop, rowYBottom);
+        if (t) extraLines.push(`${cols[ci].label}: ${t}`);
       }
-      const variantLabel = variantParts.join(" ").trim();
+      const descriptionHtml = [specText, ...extraLines]
+        .filter(Boolean)
+        .map((line) => `<p>${escapeHtml(line)}</p>`)
+        .join("\n");
 
       const baseId = modelNo || imageKey.replace(/^nj-/, "");
-      let sourceUrl = `nanjing://${baseId}${variantLabel ? `-${slugify(variantLabel)}` : ""}`;
+      const disambiguator = [sizeLabel, unitLabel].filter(Boolean).join(" ") || `row${pi + 1}`;
+      let sourceUrl = `nanjing://${baseId}-${slugify(disambiguator)}`;
       let n = 2;
       while (state.seenSourceUrls.has(sourceUrl)) {
-        sourceUrl = `nanjing://${baseId}${variantLabel ? `-${slugify(variantLabel)}` : ""}-${n}`;
+        sourceUrl = `nanjing://${baseId}-${slugify(disambiguator)}-${n}`;
         n++;
       }
       state.seenSourceUrls.add(sourceUrl);
 
-      const titleBits = [titlePrefix, state.currentSection, variantLabel].filter(Boolean);
-      const title = titleBits.join(" ").replace(/\s+/g, " ").trim() || `${titlePrefix} ${modelNo || "product"}`;
+      // SKU is Model No., verbatim, whenever that alone is already unique
+      // — only picks up a size/unit suffix if two rows would otherwise
+      // collide on the exact same Model No. (the shared-top-of-group case,
+      // e.g. one light bar model printed once above 5 distinct lengths).
+      let sku = modelNo || `NJ-${slugify(baseId) || state.rows.length}`.toUpperCase();
+      if (state.seenSkus.has(sku)) {
+        const suffixed = `${sku}-${slugify(disambiguator)}`;
+        sku = suffixed;
+        let sn = 2;
+        while (state.seenSkus.has(sku)) {
+          sku = `${suffixed}-${sn}`;
+          sn++;
+        }
+      }
+      state.seenSkus.add(sku);
+
+      const titleBits = [titlePrefix, seriesCode, sizeLabel, typeLabel, unitLabel].filter(Boolean);
+      const title = titleBits.join(" ").replace(/\s+/g, " ").trim() || `${titlePrefix} ${seriesCode}`;
 
       state.rows.push({
-        sku: modelNo ? `${modelNo}${variantLabel ? `-${slugify(variantLabel)}` : ""}` : slugify(sourceUrl.replace("nanjing://", "")),
+        sku,
         sourceUrl,
         imageKey,
         title,
         category,
         priceUSD,
+        descriptionHtml,
         imageBuffer: bestImage ? Buffer.from(bestImage.info.bytes) : null,
         imageMime: bestImage ? "image/jpeg" : null,
       });
@@ -309,17 +452,26 @@ function processRegion(state, { items, images, bannerQueue, cols, yTop, yBottom 
 
 // Parses a Nanjing Jiuguang pricelist PDF (as a Buffer/Uint8Array) into
 // rows. Each row: { sku, sourceUrl, imageKey, title, category, priceUSD,
-// imageBuffer, imageMime }. imageKey identifies the shared photo for a
-// whole size/variant group — several rows can point at the same imageKey,
-// mirroring how MagicstarImage is keyed by SKU but here keyed by the
-// group rather than the (now per-variant, disambiguated) row SKU.
+// descriptionHtml, imageBuffer, imageMime }. imageKey identifies the
+// shared photo for a whole size/variant group — several rows can point at
+// the same imageKey, mirroring how MagicstarImage is keyed by SKU but here
+// keyed by the group rather than the (now per-variant, disambiguated) row
+// SKU.
 export async function parseNanjingPdf(pdfBytes) {
   const pdfjsData = new Uint8Array(pdfBytes);
   const pdfLibData = new Uint8Array(pdfBytes);
   const doc = await getDocument({ data: pdfjsData }).promise;
   const libDoc = await PDFDocument.load(pdfLibData, { updateMetadata: false });
 
-  const state = { currentSection: "", currentCategory: "VELDT", seenSourceUrls: new Set(), rows: [] };
+  const state = {
+    currentSection: "",
+    currentCategory: "VELDT",
+    currentTypeLabel: "Light",
+    seriesCodes: new Map(),
+    seenSourceUrls: new Set(),
+    seenSkus: new Set(),
+    rows: [],
+  };
   let activeCols = null;
 
   for (let p = 1; p <= doc.numPages; p++) {
