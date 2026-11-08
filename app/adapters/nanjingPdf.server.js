@@ -69,23 +69,28 @@
 //     empty descriptionHtml, so all of that real product detail was read
 //     out of the PDF and then silently thrown away.
 //  3. Title simplified to a fixed, short shape: "<WOEST Kudu|WOEST Veldt>
-//     <series code> <size> <type> <Pair|Single>" — e.g. "WOEST Kudu X3 5"
-//     Driving Light Pair". The old title strung together the full raw
-//     sub-heading text plus every other column's value, which produced
-//     long, cluttered titles. The PDF's own sub-headings are themselves
-//     inconsistent free text ("3 inch/5 inch Side Shooter Series", "3
-//     inch/ 5 inch Baja Style DRL Pods Light", ...), so rather than using
-//     them verbatim, each DISTINCT sub-heading first seen while walking
-//     the document gets its own short code — X1, X2, X3, ... in the order
-//     encountered — and that code is what lands in the title. "Type" is a
-//     best-effort classification (Driving Light / Light Bar / Work Light /
-//     Whip Light / Motorcycle Light / UTV Light / Accessory, falling back
-//     to the generic "Light") read off the same banners used for the
-//     Kudu/Veldt split. Like every other best-effort piece of this parser,
-//     a wrong series code or type is a quick manual edit at review time,
-//     not a blocker — the raw banner text and full spec paragraph are
-//     still preserved verbatim in the description, nothing is lost, only
-//     kept out of the title.
+//     <series> <size> <type> <Pair|Single>" — e.g. "WOEST Kudu Baja Style
+//     DRL Pods 3" Driving Light Pair". The old title strung together the
+//     full raw sub-heading text plus every other column's value, which
+//     produced long, cluttered titles. First attempt at fixing this
+//     replaced each sub-heading with an invented code (X1, X2, X3, ...);
+//     per Coenraad, that was too abstract to be useful — he'd rather see
+//     the PDF's own real category/series name. So "series" is now the raw
+//     sub-heading text itself (e.g. "3 inch/5 inch Side Shooter Series",
+//     "3 inch/ 5 inch Baja Style DRL Pods Light"), trimmed of the bits
+//     already shown elsewhere in the title — size, "LED"/"Led", and the
+//     generic nouns the Type field already supplies ("Light"/"Lights"/
+//     "Bar"/"Lighting"/"Series"/"for") — via cleanSeriesName() below,
+//     rather than used completely verbatim (which is exactly the clutter
+//     this was meant to remove) or replaced with a made-up code (too
+//     opaque). "Type" is a best-effort classification (Driving Light /
+//     Light Bar / Work Light / Whip Light / Motorcycle Light / UTV Light /
+//     Accessory, falling back to the generic "Light") read off the same
+//     banners used for the Kudu/Veldt split. Like every other best-effort
+//     piece of this parser, a wrong series name or type is a quick manual
+//     edit at review time, not a blocker — the raw banner text and full
+//     spec paragraph are still preserved verbatim in the description,
+//     nothing is lost, only trimmed out of the title.
 //
 // Section banners (the full-width coloured bands like "3-5inch Led Driving
 // Lights", "LED Light Bar", "Universal Roll Bar Mount LED work Light") are
@@ -93,9 +98,9 @@
 // walking the document top to bottom, page to page — but only a banner
 // that clearly names a category (see KUDU_RE/VELDT_RE below) changes the
 // current Kudu/Veldt classification; a plain sub-heading like "3 inch/5
-// inch Side Shooter Series" still earns its own series code and (if it
-// matches one of the type rules) can update the running type label, but
-// leaves the Kudu/Veldt classification as it was. Per Coenraad: anything
+// inch Side Shooter Series" still earns its own (cleaned) series name and
+// (if it matches one of the type rules) can update the running type label,
+// but leaves the Kudu/Veldt classification as it was. Per Coenraad: anything
 // under a banner mentioning "driving", "spot" or "light bar" is WOEST Kudu;
 // everything else (grill lights, motorcycle lights, whip lights, rock
 // lights, mirror lights, turn signal kits, chase lights, UTV pod lights/
@@ -147,6 +152,38 @@ function classifyProductType(text) {
     if (re.test(text)) return label;
   }
   return null;
+}
+
+// 2026-11-08, round 2 per Coenraad: use the PDF's own series/category
+// banner for the title's series slot instead of an invented X1/X2/...
+// code — but trimmed of the bits already shown elsewhere in the title
+// (size, "LED"/"Led", and the generic nouns the Type classifier already
+// supplies — "Light"/"Lights"/"Bar"/"Lighting"/"Series"/"for"), since the
+// raw banner text on its own ("3 inch/ 5 inch Baja Style DRL Pods Light")
+// is exactly the clutter the title was simplified away from. Falls back
+// to the untouched raw text if stripping would leave nothing — never
+// returns an empty series name.
+function cleanSeriesName(raw) {
+  let s = raw || "";
+  s = s.replace(
+    /\d+(?:\.\d+)?\s*(?:-\s*\d+(?:\.\d+)?\s*)?(?:inch(?:es)?|["'‘’“”″])(?:\s*\/\s*\d+(?:\.\d+)?\s*(?:inch(?:es)?|["'‘’“”″]))*/gi,
+    " ",
+  );
+  s = s.replace(/\bled\b/gi, " ");
+  s = s.replace(/\b(series|lights?|lighting|bar|for)\b/gi, " ");
+  // Any quote-like character left at this point is decorative punctuation
+  // around a brand/style name (e.g. "Strands""Hella" Style...), not a
+  // size — the real size already matched and was removed above. Replace
+  // with a space rather than dropping it outright — these quotes act as
+  // word separators in the raw PDF text ("Strands""Hella" with no space
+  // between the pairs), so deleting them merged the two words into one
+  // ("StrandsHella") instead of leaving them as separate words.
+  s = s.replace(/["'‘’“”″]/g, " ");
+  // Slash/comma are almost always joiners even with no surrounding space
+  // ("White/Amber") — but a bare hyphen is often part of a real compound
+  // word ("Designer-inspired"), so it's left alone here.
+  s = s.replace(/[/,]+/g, " ").replace(/\s+/g, " ").trim();
+  return s || cleanText(raw);
 }
 
 const PAGE_TOP = 10000;
@@ -347,10 +384,10 @@ function processRegion(state, { items, images, bannerQueue, cols, yTop, yBottom 
       const type = classifyProductType(b.text);
       if (type) state.currentTypeLabel = type;
     }
-    if (!state.seriesCodes.has(state.currentSection)) {
-      state.seriesCodes.set(state.currentSection, `X${state.seriesCodes.size + 1}`);
+    if (!state.seriesNames.has(state.currentSection)) {
+      state.seriesNames.set(state.currentSection, cleanSeriesName(state.currentSection));
     }
-    const seriesCode = state.seriesCodes.get(state.currentSection);
+    const seriesCode = state.seriesNames.get(state.currentSection);
     const category = state.currentCategory;
     const titlePrefix = category === "KUDU" ? TITLE_PREFIX_KUDU : TITLE_PREFIX_VELDT;
     const typeLabel = state.currentTypeLabel;
@@ -467,7 +504,7 @@ export async function parseNanjingPdf(pdfBytes) {
     currentSection: "",
     currentCategory: "VELDT",
     currentTypeLabel: "Light",
-    seriesCodes: new Map(),
+    seriesNames: new Map(),
     seenSourceUrls: new Set(),
     seenSkus: new Set(),
     rows: [],
