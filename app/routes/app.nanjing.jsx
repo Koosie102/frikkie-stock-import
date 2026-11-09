@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useLoaderData, useFetcher, useSearchParams } from "@remix-run/react";
+import { useLoaderData, useFetcher, useSearchParams, useRevalidator } from "@remix-run/react";
 import {
   unstable_parseMultipartFormData,
   unstable_createMemoryUploadHandler,
@@ -7,7 +7,7 @@ import {
 import {
   Page, Card, BlockStack, InlineStack, Text, Button, Banner,
   IndexTable, useIndexResourceState, Badge, TextField, Tabs, Link, Modal,
-  DropZone, Thumbnail,
+  DropZone, Thumbnail, ProgressBar,
 } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -18,6 +18,7 @@ import {
   groupByBaseFamily,
   catalogEntryToDescriptionHtml,
 } from "../adapters/nanjingCatalog.server";
+import { fetchNanjingWebsiteCatalog } from "../adapters/nanjingWebsite.server";
 import { pushStagedProduct, getPushChannelInfo } from "../adapters/shopifyPush.server";
 import { bulkSyncPrices } from "../adapters/bulkPriceSync.server";
 import { matchSkusToShopify, syncVariantPrice, fetchVendorProducts, fuzzyMatchTitles, checkProductsExist } from "../adapters/shopifyMatch.server";
@@ -36,6 +37,73 @@ const TABS = [
   { id: "pushed", label: "Pushed", filter: { status: "PUSHED" } },
 ];
 const SORT_FIELDS = ["title", "sku", null, "costZar", "retailZar", null, null];
+
+// Runs the Jiuguang website fetch + match in the background, same
+// ImportRun/log-tail pattern used by MagicStar's Alibaba catalog fetch and
+// STEDI's scraper — ~390 product-page requests, even at a courteous pace,
+// takes a few minutes and isn't something to block the request on. Uses
+// source "NANJING" (the only valid Source enum value for this tab) with
+// kind "website" so its ImportRun rows don't collide with the pricelist
+// upload's "latest run" status — same `kind` column added for MagicStar's
+// catalog-vs-pricelist split.
+async function runNanjingWebsiteCatalogInBackground(runId) {
+  const logLines = [];
+  const log = (line) => {
+    const stamp = new Date().toISOString().slice(11, 19);
+    logLines.push(`[${stamp}] ${line}`);
+    if (logLines.length > 150) logLines.shift();
+  };
+  const flush = async (extra = {}) => {
+    await db.importRun.update({ where: { id: runId }, data: { logTail: logLines.join("\n"), ...extra } }).catch(() => {});
+  };
+
+  try {
+    log("Starting Jiuguang website fetch.");
+    await flush({ statusMessage: "Reading sitemap…" });
+
+    const entries = await fetchNanjingWebsiteCatalog(async (progress) => {
+      if (progress.error) {
+        log(`[${progress.index}/${progress.total}] Skipped: ${progress.title} — ${progress.error}`);
+      } else {
+        log(`[${progress.index}/${progress.total}] Fetched: ${progress.title} (${progress.code})`);
+      }
+      await flush({ totalFound: progress.total, totalDone: progress.index, statusMessage: `Fetching product pages: ${progress.index}/${progress.total}` });
+    });
+
+    const withCode = entries.filter((e) => e.code);
+    const failed = entries.length - withCode.length;
+    log(`Website fetch done — ${withCode.length} product(s) read with a model code (${failed} skipped/failed).`);
+    await flush({ statusMessage: `Matching ${withCode.length} website entries to staged products…` });
+
+    const baseFamilyMap = groupByBaseFamily(withCode);
+    const staged = await db.stagedProduct.findMany({
+      where: { source: "NANJING", sku: { not: null } },
+      select: { id: true, sku: true, title: true },
+    });
+
+    let exact = 0, approx = 0;
+    for (const p of staged) {
+      const match = matchCatalogEntry(p.sku, p.title, baseFamilyMap);
+      if (!match) continue;
+      const data = { descriptionHtml: catalogEntryToDescriptionHtml(match.entry) };
+      if (match.entry.images?.length) data.images = match.entry.images;
+      await db.stagedProduct.update({ where: { id: p.id }, data });
+      log(`Matched (${match.confidence}, staged "${p.title}") -> ${match.entry.url}`);
+      if (match.confidence === "exact") exact += 1; else approx += 1;
+    }
+
+    log("Website catalog match complete.");
+    await flush({
+      status: "done",
+      statusMessage: `Done — ${withCode.length} product(s) read from the website, ${failed} skipped/failed. Of ${staged.length} staged product(s): ${exact} matched confidently (photo + description updated), ${approx} matched approximately, ${staged.length - exact - approx} had no good match.`,
+      finishedAt: new Date(),
+    });
+  } catch (err) {
+    log(`Fetch failed: ${err.message || err}`);
+    console.error("Nanjing website catalog fetch failed:", err);
+    await flush({ status: "failed", statusMessage: "Failed — see error below.", errorLog: String(err.message || err), finishedAt: new Date() });
+  }
+}
 
 function imageUrlFor(request, imageKey) {
   const appUrl = process.env.SHOPIFY_APP_URL || new URL(request.url).origin;
@@ -68,9 +136,15 @@ export const loader = async ({ request }) => {
     fuzzyMatches = fuzzyMatchTitles(unmatched.map((p) => ({ id: p.id, title: p.title })), vendorProducts);
   }
 
+  const latestWebsiteCatalogRun = await db.importRun.findFirst({
+    where: { source: "NANJING", kind: "website" },
+    orderBy: { startedAt: "desc" },
+  });
+
   return {
     staged, pushedCount, totalCount, tabId, q, sortField, sortDir,
     shopDomain: session.shop, shopifyMatches, fuzzyMatches, settings,
+    latestWebsiteCatalogRun,
   };
 };
 
@@ -329,6 +403,17 @@ export const action = async ({ request }) => {
       await db.stagedProduct.deleteMany({ where: { id: { in: deletable.map((p) => p.id) } } });
     }
     return { ok: true, mode: "removeDuplicates", removed: deletable.length, pushedStale };
+  }
+
+  if (intent === "fetchWebsiteCatalog") {
+    const running = await db.importRun.findFirst({ where: { source: "NANJING", kind: "website", status: "running" } });
+    if (running) {
+      return { ok: false, mode: "fetchWebsiteCatalog", error: "A website fetch is already running — check progress below." };
+    }
+    const run = await db.importRun.create({ data: { source: "NANJING", kind: "website", status: "running" } });
+    // Deliberately not awaited — see runNanjingWebsiteCatalogInBackground's comment.
+    runNanjingWebsiteCatalogInBackground(run.id);
+    return { ok: true, mode: "fetchWebsiteCatalog" };
   }
 
   async function performPush(stagedList, channelInfo, forceNewIds = new Set()) {
@@ -706,6 +791,71 @@ function UploadCatalogCard() {
   );
 }
 
+function WebsiteCatalogCard({ run }) {
+  const fetchFetcher = useFetcher();
+  const fetching = fetchFetcher.state !== "idle";
+  const result = fetchFetcher.data;
+  const revalidator = useRevalidator();
+  const running = run?.status === "running";
+
+  useEffect(() => {
+    if (!running) return;
+    const interval = setInterval(() => {
+      if (revalidator.state === "idle") revalidator.revalidate();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [running, revalidator]);
+
+  return (
+    <Card>
+      <BlockStack gap="300">
+        <InlineStack align="space-between">
+          <Text as="h2" variant="headingMd">Fetch from Jiuguang's website (optional)</Text>
+          {run?.status === "running" && <Badge tone="info">Running</Badge>}
+          {run?.status === "done" && <Badge tone="success">Done</Badge>}
+          {run?.status === "failed" && <Badge tone="critical">Failed</Badge>}
+        </InlineStack>
+        <Text as="p" tone="subdued">
+          Jiuguang's own site (jg-ledlight.com) now has a real page per
+          product — a full spec table like the catalog PDF, plus (unlike
+          the PDF) a real product photo. Matching is by model code, same as
+          the catalog PDF upload above, and on a match both the description
+          AND the photo are replaced — there's still no pricing on the
+          site, so prices are untouched either way. This reads ~390 pages
+          one at a time at a courteous pace, so it's a background job and
+          takes a few minutes.
+        </Text>
+        {result?.mode === "fetchWebsiteCatalog" && result.ok === false && <Banner tone="critical">{result.error}</Banner>}
+        {running && (
+          <BlockStack gap="200">
+            <Text as="p" tone="subdued">
+              {run.statusMessage || "Starting…"}
+              {" — this runs in the background, feel free to leave this tab and come back."}
+            </Text>
+            {run.totalFound > 0 && <ProgressBar progress={Math.round((run.totalDone / run.totalFound) * 100)} size="small" />}
+          </BlockStack>
+        )}
+        {run?.status === "done" && run.statusMessage && <Text as="p" tone="subdued">{run.statusMessage}</Text>}
+        {run?.status === "failed" && <Banner tone="critical">{run.errorLog || "Unknown error."}</Banner>}
+        {run?.logTail && (
+          <details>
+            <summary style={{ cursor: "pointer", color: "var(--p-color-text-link, #2c6ecb)" }}>View log</summary>
+            <div style={{ marginTop: 8, maxHeight: 320, overflowY: "auto", background: "#1a1a1a", color: "#e0e0e0", padding: 12, borderRadius: 6, fontFamily: "monospace", fontSize: 12, whiteSpace: "pre-wrap" }}>
+              {run.logTail}
+            </div>
+          </details>
+        )}
+        <fetchFetcher.Form method="post">
+          <input type="hidden" name="intent" value="fetchWebsiteCatalog" />
+          <Button submit loading={fetching || running} disabled={fetching || running}>
+            {running ? "Running…" : "Fetch from website"}
+          </Button>
+        </fetchFetcher.Form>
+      </BlockStack>
+    </Card>
+  );
+}
+
 function ConflictResolutionModal({ pushResult, onDismiss }) {
   const resolveFetcher = useFetcher();
   const [choices, setChoices] = useState({});
@@ -780,7 +930,7 @@ function ConflictResolutionModal({ pushResult, onDismiss }) {
 export default function NanjingSource() {
   const {
     staged, pushedCount, totalCount, tabId, q, sortField, sortDir,
-    shopDomain, shopifyMatches, fuzzyMatches, settings,
+    shopDomain, shopifyMatches, fuzzyMatches, settings, latestWebsiteCatalogRun,
   } = useLoaderData();
   const [searchParams, setSearchParams] = useSearchParams();
   const pushFetcher = useFetcher();
@@ -892,6 +1042,7 @@ export default function NanjingSource() {
 
         <UploadCard />
         <UploadCatalogCard />
+        <WebsiteCatalogCard run={latestWebsiteCatalogRun} />
 
         <Card>
           <BlockStack gap="300">
