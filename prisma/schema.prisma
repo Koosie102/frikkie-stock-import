@@ -153,6 +153,25 @@ model MagicstarImage {
   updatedAt DateTime @updatedAt
 }
 
+// Real product photos for WOEST Caraq, matched by SKU/model-code from a
+// ZIP of Coenraad's MagicStar Google Drive folder (see
+// magicstarDrivePhotos.server.js and the "Upload product photos" card on
+// app.magicstar.jsx) — an alternative to MagicstarImage's single
+// pricelist-extracted photo, since the Alibaba catalog scrape this was
+// meant to be enriched from has never reliably returned anything. Several
+// photos can exist per SKU (unlike MagicstarImage), so the key is
+// composite; re-uploading the same zip replaces a SKU's whole photo set
+// (old positions beyond the new count are deleted) rather than piling up.
+model MagicstarDrivePhoto {
+  sku       String
+  position  Int
+  mimeType  String
+  data      Bytes
+  updatedAt DateTime @updatedAt
+
+  @@id([sku, position])
+}
+
 // Same idea as MagicstarImage, for Nanjing Jiuguang's PDF pricelist — keyed
 // by imageKey rather than sku, because several staged rows (one per size/
 // variant, see nanjingPdf.server.js) can legitimately share one photo.

@@ -123,6 +123,19 @@ async function fetchRenderedHtml(url) {
   return html;
 }
 
+// Captures the page title and a chunk of body text when a listing page
+// returns real, non-shell HTML (passes looksLikeEmptyShell) but still
+// matches zero product tiles — the "0 product(s) found, no error" case
+// reported in production. Surfaced in the run's log so Coenraad can paste
+// it back for diagnosis instead of this failing silently with nothing to
+// go on (e.g. a bot-check interstitial that happens to be real, sizeable
+// HTML rather than the tiny JS-shell looksLikeEmptyShell already catches).
+function diagnosticSnippet($, html) {
+  const title = $("title").text().trim();
+  const bodyText = $("body").text().replace(/\s+/g, " ").trim().slice(0, 300);
+  return `title="${title || "(none)"}" htmlLength=${html.length} bodyText="${bodyText || "(empty)"}"`;
+}
+
 function listPageUrl(pageNum) {
   return pageNum === 1 ? `${BASE_URL}/productlist.html` : `${BASE_URL}/productlist-${pageNum}.html`;
 }
@@ -147,8 +160,16 @@ export async function getMagicstarProductList(onProgress) {
       const title = $(el).attr("title")?.trim() || $(el).text().trim();
       if (title) products.push({ url, title });
     });
-    if (onProgress) onProgress({ page, foundThisPage: products.length - before, totalSoFar: products.length });
-    if (products.length === before) break; // this page added nothing new
+    const foundThisPage = products.length - before;
+    if (onProgress) {
+      onProgress({
+        page,
+        foundThisPage,
+        totalSoFar: products.length,
+        diagnostic: foundThisPage === 0 ? diagnosticSnippet($, html) : null,
+      });
+    }
+    if (foundThisPage === 0) break; // this page added nothing new
   }
   return products;
 }

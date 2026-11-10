@@ -13,6 +13,7 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { parseMagicstarPdf } from "../adapters/magicstarPdf.server";
 import { fetchMagicstarCatalog, matchMagicstarEntry } from "../adapters/magicstarCatalog.server";
+import { parseDrivePhotoZip, matchDrivePhotosToSkus } from "../adapters/magicstarDrivePhotos.server";
 import { pushStagedProduct, getPushChannelInfo } from "../adapters/shopifyPush.server";
 import { bulkSyncPrices } from "../adapters/bulkPriceSync.server";
 import {
@@ -38,6 +39,11 @@ const SORT_FIELDS = ["title", "sku", null, "costZar", "retailZar", null, null];
 function imageUrlFor(request, sku) {
   const appUrl = process.env.SHOPIFY_APP_URL || new URL(request.url).origin;
   return `${appUrl}/files/magicstar/${encodeURIComponent(sku)}`;
+}
+
+function drivePhotoUrlFor(request, sku, position) {
+  const appUrl = process.env.SHOPIFY_APP_URL || new URL(request.url).origin;
+  return `${appUrl}/files/magicstar-photo/${encodeURIComponent(sku)}/${position}`;
 }
 
 // Runs the Alibaba catalog scrape + match in the background, same reason
@@ -67,6 +73,7 @@ async function runMagicstarCatalogInBackground(runId) {
     const entries = await fetchMagicstarCatalog(async (progress) => {
       if (progress.phase === "listing") {
         log(`Listing page ${progress.page} — ${progress.totalSoFar} product(s) found so far.`);
+        if (progress.diagnostic) log(`  No products matched on this page — ${progress.diagnostic}`);
         await flush({ statusMessage: `Listing products: page ${progress.page} (${progress.totalSoFar} found so far)` });
       } else {
         log(`[${progress.index}/${progress.total}] Fetched: ${progress.title}`);
@@ -143,13 +150,67 @@ export const action = async ({ request }) => {
   const { admin } = await authenticate.admin(request);
   const contentType = request.headers.get("content-type") || "";
 
-  // The upload form posts multipart/form-data (it carries a file); every
+  // The upload forms post multipart/form-data (they carry a file); every
   // other action on this page is a plain fetcher.submit() post, same as
   // every other source's route — branch on content-type rather than
-  // trying to parse every request the same way.
+  // trying to parse every request the same way. maxPartSize is sized for
+  // the bigger of the two uploads here (a photos ZIP, which can be
+  // several hundred MB across ~70 SKUs' worth of real photos) rather than
+  // the PDF's own much smaller needs.
   if (contentType.includes("multipart/form-data")) {
-    const uploadHandler = unstable_createMemoryUploadHandler({ maxPartSize: 20 * 1024 * 1024 });
+    const uploadHandler = unstable_createMemoryUploadHandler({ maxPartSize: 300 * 1024 * 1024 });
     const formData = await unstable_parseMultipartFormData(request, uploadHandler);
+
+    const photosZip = formData.get("photosZip");
+    if (photosZip && typeof photosZip !== "string") {
+      let entries;
+      try {
+        const arrayBuffer = await photosZip.arrayBuffer();
+        entries = parseDrivePhotoZip(Buffer.from(arrayBuffer));
+      } catch (err) {
+        console.error("MagicStar photo ZIP parse failed:", err);
+        return { ok: false, mode: "uploadPhotos", error: `Couldn't read that ZIP: ${String(err.message || err)}` };
+      }
+      if (entries.length === 0) {
+        return { ok: false, mode: "uploadPhotos", error: "No image files were found in that ZIP — is it the right folder?" };
+      }
+
+      const stagedSkus = await db.stagedProduct.findMany({
+        where: { source: "MAGICSTAR", sku: { not: null } },
+        select: { sku: true },
+        distinct: ["sku"],
+      });
+      const { photosBySku, unmatchedFolders } = matchDrivePhotosToSkus(entries, stagedSkus.map((s) => s.sku));
+
+      let productsUpdated = 0;
+      let photosStored = 0;
+      for (const [sku, photos] of photosBySku) {
+        await db.magicstarDrivePhoto.deleteMany({ where: { sku } });
+        for (let i = 0; i < photos.length; i++) {
+          await db.magicstarDrivePhoto.create({
+            data: { sku, position: i, mimeType: photos[i].mimeType, data: photos[i].data },
+          });
+        }
+        photosStored += photos.length;
+        const urls = photos.map((_, i) => drivePhotoUrlFor(request, sku, i));
+        const { count } = await db.stagedProduct.updateMany({
+          where: { source: "MAGICSTAR", sku },
+          data: { images: urls },
+        });
+        productsUpdated += count;
+      }
+
+      return {
+        ok: true,
+        mode: "uploadPhotos",
+        matchedSkus: photosBySku.size,
+        productsUpdated,
+        photosStored,
+        unmatchedFolders: unmatchedFolders.slice(0, 30),
+        unmatchedFolderTotal: unmatchedFolders.length,
+      };
+    }
+
     const file = formData.get("pricelist");
 
     if (!file || typeof file === "string") {
@@ -619,6 +680,93 @@ function UploadCard() {
   );
 }
 
+function UploadPhotosCard() {
+  const photosFetcher = useFetcher();
+  const uploading = photosFetcher.state !== "idle";
+  const result = photosFetcher.data;
+  const [file, setFile] = useState(null);
+
+  const handleDrop = (_dropFiles, acceptedFiles) => {
+    const f = acceptedFiles[0];
+    if (f) setFile(f);
+  };
+
+  function handleSubmit() {
+    if (!file) return;
+    const fd = new FormData();
+    fd.set("photosZip", file);
+    photosFetcher.submit(fd, { method: "post", encType: "multipart/form-data" });
+  }
+
+  useEffect(() => {
+    if (photosFetcher.state === "idle" && photosFetcher.data?.mode === "uploadPhotos" && photosFetcher.data.ok) {
+      setFile(null);
+    }
+  }, [photosFetcher.state, photosFetcher.data]);
+
+  return (
+    <Card>
+      <BlockStack gap="300">
+        <Text as="h2" variant="headingMd">Upload product photos (optional)</Text>
+        <Text as="p" tone="subdued">
+          MagicStar's rep shares real product photos in a Google Drive
+          folder, organised as Vehicle / Model code / photos (e.g.
+          Jimny / JM75 / *.jpg) — the model-code folder names line up with
+          the SKUs read from the pricelist. In Drive, right-click the
+          shared folder (or just the vehicle sub-folders you want) and
+          choose Download — Drive zips it up for you. Drop that .zip here
+          and matching SKUs get the real photo(s) instead of the single
+          cropped photo pulled from the pricelist PDF. Folders that don't
+          match any staged SKU are listed below rather than silently
+          skipped, so a renamed or new code is easy to spot.
+        </Text>
+        {result?.mode === "uploadPhotos" && result.ok === false && <Banner tone="critical" title="Couldn't process that file">{result.error}</Banner>}
+        {result?.mode === "uploadPhotos" && result.ok === true && (
+          <Banner tone="success" title="Photos matched">
+            <BlockStack gap="200">
+              <Text as="p">
+                {`Matched ${result.matchedSkus} SKU(s), updating ${result.productsUpdated} staged product(s) with ${result.photosStored} real photo(s).`}
+              </Text>
+              {result.unmatchedFolderTotal > 0 && (
+                <details>
+                  <summary style={{ cursor: "pointer", color: "var(--p-color-text-link, #2c6ecb)" }}>
+                    {`${result.unmatchedFolderTotal} folder(s) didn't match any staged SKU`}
+                  </summary>
+                  <div style={{ marginTop: 8 }}>
+                    {result.unmatchedFolders.map((f, i) => (
+                      <Text as="p" key={i} tone="subdued">{`${f.vehicleFolder}/${f.codeFolder} (${f.fileCount} photo(s))`}</Text>
+                    ))}
+                    {result.unmatchedFolderTotal > result.unmatchedFolders.length && (
+                      <Text as="p" tone="subdued">{`…and ${result.unmatchedFolderTotal - result.unmatchedFolders.length} more.`}</Text>
+                    )}
+                  </div>
+                </details>
+              )}
+            </BlockStack>
+          </Banner>
+        )}
+        <DropZone accept="application/zip,.zip" type="file" allowMultiple={false} onDrop={handleDrop}>
+          {file ? (
+            <div style={{ padding: 16 }}>
+              <InlineStack gap="200" blockAlign="center">
+                <Thumbnail size="small" alt="ZIP" source="https://cdn.shopify.com/s/files/applications/0e8/4e4/products/file-icon.png" />
+                <Text as="span">{file.name}</Text>
+              </InlineStack>
+            </div>
+          ) : (
+            <DropZone.FileUpload actionTitle="Add photos .zip" actionHint="or drop a .zip file here" />
+          )}
+        </DropZone>
+        <InlineStack>
+          <Button onClick={handleSubmit} disabled={!file} loading={uploading} variant="primary">
+            {uploading ? "Matching…" : "Match & attach photos"}
+          </Button>
+        </InlineStack>
+      </BlockStack>
+    </Card>
+  );
+}
+
 function CatalogCard({ run }) {
   const fetchFetcher = useFetcher();
   const fetching = fetchFetcher.state !== "idle";
@@ -855,6 +1003,7 @@ export default function MagicstarSource() {
         )}
 
         <UploadCard />
+        <UploadPhotosCard />
         <CatalogCard run={latestCatalogRun} />
 
         <Card>
